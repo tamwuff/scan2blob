@@ -19,38 +19,14 @@ impl From<&str> for WuffError {
     }
 }
 
-impl From<&String> for WuffError {
-    fn from(message: &String) -> WuffError {
-        WuffError {
-            message: message.clone(),
-        }
-    }
-}
-
 impl From<String> for WuffError {
     fn from(message: String) -> WuffError {
         WuffError { message: message }
     }
 }
 
-impl From<&std::io::Error> for WuffError {
-    fn from(err: &std::io::Error) -> WuffError {
-        WuffError {
-            message: format!("{:?}", err),
-        }
-    }
-}
-
 impl From<std::io::Error> for WuffError {
     fn from(err: std::io::Error) -> WuffError {
-        WuffError {
-            message: format!("{:?}", err),
-        }
-    }
-}
-
-impl From<&tokio::task::JoinError> for WuffError {
-    fn from(err: &tokio::task::JoinError) -> WuffError {
         WuffError {
             message: format!("{:?}", err),
         }
@@ -65,16 +41,24 @@ impl From<tokio::task::JoinError> for WuffError {
     }
 }
 
-impl<T> From<&tokio::sync::mpsc::error::SendError<T>> for WuffError {
-    fn from(err: &tokio::sync::mpsc::error::SendError<T>) -> WuffError {
+impl<T> From<tokio::sync::mpsc::error::SendError<T>> for WuffError {
+    fn from(err: tokio::sync::mpsc::error::SendError<T>) -> WuffError {
         WuffError {
             message: format!("{:?}", err),
         }
     }
 }
 
-impl<T> From<tokio::sync::mpsc::error::SendError<T>> for WuffError {
-    fn from(err: tokio::sync::mpsc::error::SendError<T>) -> WuffError {
+impl From<azure_storage::Error> for WuffError {
+    fn from(err: azure_storage::Error) -> WuffError {
+        WuffError {
+            message: format!("{:?}", err),
+        }
+    }
+}
+
+impl From<serde_json::Error> for WuffError {
+    fn from(err: serde_json::Error) -> WuffError {
         WuffError {
             message: format!("{:?}", err),
         }
