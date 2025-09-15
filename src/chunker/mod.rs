@@ -1,7 +1,7 @@
 pub fn new(
     initial_chunk_size: usize,
     max_chunk_size: usize,
-    max_num_chunks: usize,
+    max_num_chunks: u16,
 ) -> (Writer, Reader) {
     debug_assert!(initial_chunk_size > 0);
     debug_assert!(max_chunk_size > 0);
@@ -67,8 +67,8 @@ pub fn new(
 pub struct Writer {
     chunk_size: usize,
     max_chunk_size: usize,
-    max_num_chunks: usize,
-    num_chunks: usize,
+    max_num_chunks: u16,
+    num_chunks: u16,
     done: bool,
     result: std::sync::Arc<
         std::sync::OnceLock<Result<(), crate::error::WuffError>>,
@@ -227,8 +227,8 @@ impl Drop for Writer {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum ChunkOrEof<'a> {
-    Chunk(&'a [u8]),
+pub enum ChunkOrEof {
+    Chunk(Vec<u8>),
     Eof([u8; 16]),
 }
 
@@ -275,9 +275,14 @@ impl Reader {
         };
 
         <md5::Md5 as md5::Digest>::update(&mut self.hasher, &fresh_chunk);
-
+        let chunk_copy: Vec<u8> = fresh_chunk.clone();
         self.chunk = Some(fresh_chunk);
-        Ok(ChunkOrEof::Chunk(self.chunk.as_ref().unwrap()))
+
+        // We could define ChunkOrEof::Chunk to contain a reference into
+        // self.chunk, but that actually doesn't buy us anything because in
+        // order to upload anything to Azure it has to be 'static anyway.
+        // (At least with how the current azure SDK crates work.)
+        Ok(ChunkOrEof::Chunk(chunk_copy))
     }
 
     pub fn observe_error(&self, error: crate::error::WuffError) {

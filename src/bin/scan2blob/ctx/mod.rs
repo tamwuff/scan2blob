@@ -12,14 +12,16 @@ pub fn make_cmdline_parser() -> clap::Command {
 }
 
 #[derive(serde::Deserialize)]
-pub struct ConfigDestination {
-    #[serde(flatten)]
-    pub blob_storage_spec: scan2blob::util::BlobStorageSpec,
+#[serde(tag = "type")]
+pub enum ConfigListener {
+    #[serde(rename = "sftp")]
+    Sftp(crate::listener::sftp::ConfigListenerSftp),
 }
 
 #[derive(serde::Deserialize)]
 pub struct Config {
-    pub destinations: std::collections::HashMap<String, ConfigDestination>,
+    pub listeners: Vec<ConfigListener>,
+    pub destinations: crate::destination::ConfigDestinations,
 }
 
 pub struct Ctx {

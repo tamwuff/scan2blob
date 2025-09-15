@@ -1,15 +1,28 @@
 mod ctx;
 mod destination;
+mod listener;
 
 async fn async_main(
     ctx: std::sync::Arc<crate::ctx::Ctx>,
 ) -> Result<(), scan2blob::error::WuffError> {
-    for (_, destination_cfg) in &ctx.config.destinations {
-        let destination: destination::Destination =
-            destination::Destination::new(destination_cfg)?;
-        destination.test().await;
+    let destinations: destination::Destinations =
+        destination::Destinations::new(&ctx)?;
+    for listener_cfg in &ctx.config.listeners {
+        match listener_cfg {
+            ctx::ConfigListener::Sftp(listener_cfg) => {
+                let listener: listener::sftp::SftpListener =
+                    listener::sftp::SftpListener::new(
+                        &ctx,
+                        listener_cfg,
+                        &destinations,
+                    )?;
+                std::sync::Arc::new(listener).start();
+            }
+        }
     }
-    Ok(())
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(86400)).await;
+    }
 }
 
 fn main() -> Result<(), scan2blob::error::WuffError> {

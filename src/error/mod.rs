@@ -64,3 +64,11 @@ impl From<serde_json::Error> for WuffError {
         }
     }
 }
+
+impl From<russh::Error> for WuffError {
+    fn from(err: russh::Error) -> WuffError {
+        WuffError {
+            message: format!("{:?}", err),
+        }
+    }
+}

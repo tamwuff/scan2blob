@@ -35,3 +35,13 @@ pub struct BlobStorageSpec {
     pub sas: Sas,
     pub prefix: String,
 }
+
+pub fn system_time_to_utc_rfc3339(t: std::time::SystemTime) -> String {
+    let as_time_t: u64 = t
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let as_jiff: jiff::Timestamp =
+        jiff::Timestamp::from_second(as_time_t as i64).unwrap();
+    format!("{}", as_jiff)
+}
