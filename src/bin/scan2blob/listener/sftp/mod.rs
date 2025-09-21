@@ -168,7 +168,10 @@ impl russh_sftp::server::Handler for SftpSession {
         _attrs: russh_sftp::protocol::FileAttributes,
     ) -> Result<russh_sftp::protocol::Handle, Self::Error> {
         if pflags.contains(russh_sftp::protocol::OpenFlags::READ)
-            || pflags.contains(russh_sftp::protocol::OpenFlags::APPEND)
+            || !(pflags.contains(russh_sftp::protocol::OpenFlags::WRITE)
+                || pflags.contains(russh_sftp::protocol::OpenFlags::APPEND))
+            || !(pflags.contains(russh_sftp::protocol::OpenFlags::TRUNCATE)
+                || pflags.contains(russh_sftp::protocol::OpenFlags::EXCLUDE))
         {
             return Err(self.unimplemented());
         }
@@ -203,7 +206,7 @@ impl russh_sftp::server::Handler for SftpSession {
                 error_message: format!("{}", err),
                 language_tag: "en-US".to_string(),
             });
-        };
+        }
 
         Ok(russh_sftp::protocol::Status {
             id,
@@ -230,7 +233,11 @@ impl russh_sftp::server::Handler for SftpSession {
         };
 
         if offset != open_file.off {
-            open_file.writer.observe_error(scan2blob::error::WuffError::from("sftp client attempted random-access write which is not supported"));
+            open_file
+                .writer
+                .observe_error(scan2blob::error::WuffError::from(
+                    "sftp client attempted random-access write which is not supported",
+                ));
             return Ok(russh_sftp::protocol::Status {
                 id,
                 status_code: russh_sftp::protocol::StatusCode::OpUnsupported,
@@ -247,7 +254,7 @@ impl russh_sftp::server::Handler for SftpSession {
                 error_message: format!("{}", err),
                 language_tag: "en-US".to_string(),
             });
-        };
+        }
         open_file.off += data.len() as u64;
 
         Ok(russh_sftp::protocol::Status {
@@ -364,7 +371,7 @@ pub struct ConfigListenerSftpAuthorizedKey {
 #[derive(serde::Deserialize)]
 pub struct ConfigListenerSftp {
     listen_on: Vec<std::net::SocketAddr>,
-    host_key: String,
+    host_key: scan2blob::util::LiteralOrFile,
     authorized_keys: Vec<ConfigListenerSftpAuthorizedKey>,
 }
 
@@ -388,10 +395,11 @@ impl SftpListener {
         config: &ConfigListenerSftp,
         destinations: &crate::destination::Destinations,
     ) -> Result<Self, scan2blob::error::WuffError> {
+        let host_key: String = config.host_key.get()?;
         // Can't use the ? operator on russh::keys::PrivateKey::from_openssh()
         // because it returns a weird Result type...
         let host_key: russh::keys::PrivateKey =
-            match russh::keys::PrivateKey::from_openssh(&config.host_key) {
+            match russh::keys::PrivateKey::from_openssh(&host_key) {
                 Ok(key) => key,
                 Err(_) => {
                     return Err(scan2blob::error::WuffError::from(

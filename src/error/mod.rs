@@ -72,3 +72,11 @@ impl From<russh::Error> for WuffError {
         }
     }
 }
+
+impl From<rustls::Error> for WuffError {
+    fn from(err: rustls::Error) -> WuffError {
+        WuffError {
+            message: format!("{:?}", err),
+        }
+    }
+}

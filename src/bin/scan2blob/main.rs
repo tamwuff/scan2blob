@@ -18,6 +18,15 @@ async fn async_main(
                     )?;
                 std::sync::Arc::new(listener).start();
             }
+            ctx::ConfigListener::Webdav(listener_cfg) => {
+                let listener: listener::webdav::WebdavListener =
+                    listener::webdav::WebdavListener::new(
+                        &ctx,
+                        listener_cfg,
+                        &destinations,
+                    )?;
+                std::sync::Arc::new(listener).start();
+            }
         }
     }
     loop {
@@ -26,6 +35,13 @@ async fn async_main(
 }
 
 fn main() -> Result<(), scan2blob::error::WuffError> {
+    // Set a process-wide default crypto provider that will be used by anything
+    // that is based on rustls. i.e., this is what will be used by WebDAV, but
+    // it is not relevant to sftp or the Azure blob stuff.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("install default crypto provider");
+
     let cmdline_parser: clap::Command = crate::ctx::make_cmdline_parser();
     let cmdline_matches: clap::ArgMatches = cmdline_parser.get_matches();
 

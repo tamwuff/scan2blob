@@ -5,14 +5,15 @@ pub fn make_cmdline_parser(argv0: &'static str) -> clap::Command {
 // These types are shared between the main scan2blob server binary, and the
 // "mksas" binary. Most of the structs that define the server's config file are
 // in the server's own crate, but these ones need to be shared.
+
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(untagged)]
-pub enum Sas {
+pub enum LiteralOrEnvironmentVariable {
     Literal(String),
     EnvironmentVariable { env: String },
 }
 
-impl Sas {
+impl LiteralOrEnvironmentVariable {
     pub fn get(&self) -> Result<String, crate::error::WuffError> {
         match self {
             Self::Literal(s) => Ok(s.clone()),
@@ -29,10 +30,34 @@ impl Sas {
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+pub enum LiteralOrFile {
+    Literal(String),
+    File { file: std::path::PathBuf },
+}
+
+impl LiteralOrFile {
+    pub fn get(&self) -> Result<String, crate::error::WuffError> {
+        match self {
+            Self::Literal(s) => Ok(s.clone()),
+            Self::File { file: filename } => {
+                let data: Vec<u8> = std::fs::read(filename)?;
+                String::from_utf8(data).map_err(|_| {
+                    crate::error::WuffError::from(format!(
+                        "{:?} contains non-UTF8 data",
+                        filename
+                    ))
+                })
+            }
+        }
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct BlobStorageSpec {
     pub storage_account: String,
     pub container: String,
-    pub sas: Sas,
+    pub sas: LiteralOrEnvironmentVariable,
     pub prefix: String,
 }
 

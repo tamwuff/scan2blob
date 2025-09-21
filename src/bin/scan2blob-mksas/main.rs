@@ -123,7 +123,7 @@ fn main() -> Result<(), scan2blob::error::WuffError> {
         scan2blob::util::BlobStorageSpec {
             storage_account: storage_account.clone(),
             container: container.clone(),
-            sas: scan2blob::util::Sas::Literal(sas),
+            sas: scan2blob::util::LiteralOrEnvironmentVariable::Literal(sas),
             prefix: prefix.clone(),
         };
 
@@ -138,7 +138,7 @@ fn main() -> Result<(), scan2blob::error::WuffError> {
     println!();
 
     example_confg_file_syntax.sas =
-        scan2blob::util::Sas::EnvironmentVariable {
+        scan2blob::util::LiteralOrEnvironmentVariable::EnvironmentVariable {
             env: "NAME_OF_ENV_VAR".into(),
         };
 

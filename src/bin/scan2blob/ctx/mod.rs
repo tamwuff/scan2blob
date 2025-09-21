@@ -16,6 +16,8 @@ pub fn make_cmdline_parser() -> clap::Command {
 pub enum ConfigListener {
     #[serde(rename = "sftp")]
     Sftp(crate::listener::sftp::ConfigListenerSftp),
+    #[serde(rename = "webdav")]
+    Webdav(crate::listener::webdav::ConfigListenerWebdav),
 }
 
 #[derive(serde::Deserialize)]

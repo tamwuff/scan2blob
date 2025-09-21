@@ -414,19 +414,19 @@ mod test {
 
             let reader_task = async_spawner.spawn(async move {
                 let chunk = reader.get_next_chunk().await.unwrap();
-                assert_eq!(chunk, ChunkOrEof::Chunk(b"H"));
+                assert_eq!(chunk, ChunkOrEof::Chunk(b"H".into()));
 
                 let chunk = reader.get_next_chunk().await.unwrap();
-                assert_eq!(chunk, ChunkOrEof::Chunk(b"el"));
+                assert_eq!(chunk, ChunkOrEof::Chunk(b"el".into()));
 
                 let chunk = reader.get_next_chunk().await.unwrap();
-                assert_eq!(chunk, ChunkOrEof::Chunk(b"lo, "));
+                assert_eq!(chunk, ChunkOrEof::Chunk(b"lo, ".into()));
 
                 let chunk = reader.get_next_chunk().await.unwrap();
-                assert_eq!(chunk, ChunkOrEof::Chunk(b"worl"));
+                assert_eq!(chunk, ChunkOrEof::Chunk(b"worl".into()));
 
                 let chunk = reader.get_next_chunk().await.unwrap();
-                assert_eq!(chunk, ChunkOrEof::Chunk(b"d!"));
+                assert_eq!(chunk, ChunkOrEof::Chunk(b"d!".into()));
 
                 let chunk = reader.get_next_chunk().await.unwrap();
                 assert_eq!(chunk, ChunkOrEof::Eof(HASH_HELLO_WORLD));
@@ -454,13 +454,13 @@ mod test {
 
             let reader_task = async_spawner.spawn(async move {
                 let chunk = reader.get_next_chunk().await.unwrap();
-                assert_eq!(chunk, ChunkOrEof::Chunk(b"He"));
+                assert_eq!(chunk, ChunkOrEof::Chunk(b"He".into()));
 
                 let chunk = reader.get_next_chunk().await.unwrap();
-                assert_eq!(chunk, ChunkOrEof::Chunk(b"llo,"));
+                assert_eq!(chunk, ChunkOrEof::Chunk(b"llo,".into()));
 
                 let chunk = reader.get_next_chunk().await.unwrap();
-                assert_eq!(chunk, ChunkOrEof::Chunk(b" world!"));
+                assert_eq!(chunk, ChunkOrEof::Chunk(b" world!".into()));
 
                 let chunk = reader.get_next_chunk().await.unwrap();
                 assert_eq!(chunk, ChunkOrEof::Eof(HASH_HELLO_WORLD));
@@ -485,10 +485,10 @@ mod test {
 
             let reader_task = async_spawner.spawn(async move {
                 let chunk = reader.get_next_chunk().await.unwrap();
-                assert_eq!(chunk, ChunkOrEof::Chunk(b"He"));
+                assert_eq!(chunk, ChunkOrEof::Chunk(b"He".into()));
 
                 let chunk = reader.get_next_chunk().await.unwrap();
-                assert_eq!(chunk, ChunkOrEof::Chunk(b"llo,"));
+                assert_eq!(chunk, ChunkOrEof::Chunk(b"llo,".into()));
 
                 let result = reader.get_next_chunk().await;
                 assert!(result.is_err());
@@ -514,13 +514,13 @@ mod test {
 
             let reader_task = async_spawner.spawn(async move {
                 let chunk = reader.get_next_chunk().await.unwrap();
-                assert_eq!(chunk, ChunkOrEof::Chunk(b"He"));
+                assert_eq!(chunk, ChunkOrEof::Chunk(b"He".into()));
 
                 let chunk = reader.get_next_chunk().await.unwrap();
-                assert_eq!(chunk, ChunkOrEof::Chunk(b"llo,"));
+                assert_eq!(chunk, ChunkOrEof::Chunk(b"llo,".into()));
 
                 let chunk = reader.get_next_chunk().await.unwrap();
-                assert_eq!(chunk, ChunkOrEof::Chunk(b" world!"));
+                assert_eq!(chunk, ChunkOrEof::Chunk(b" world!".into()));
 
                 let chunk = reader.get_next_chunk().await.unwrap();
                 assert_eq!(chunk, ChunkOrEof::Eof(HASH_HELLO_WORLD));
@@ -544,7 +544,7 @@ mod test {
 
             let reader_task = async_spawner.spawn(async move {
                 let chunk = reader.get_next_chunk().await.unwrap();
-                assert_eq!(chunk, ChunkOrEof::Chunk(b"He"));
+                assert_eq!(chunk, ChunkOrEof::Chunk(b"He".into()));
             });
 
             writer_task.await.unwrap();
@@ -565,16 +565,16 @@ mod test {
 
             let reader_task = async_spawner.spawn(async move {
                 let chunk = reader.get_next_chunk().await.unwrap();
-                assert_eq!(chunk, ChunkOrEof::Chunk(b"He"));
+                assert_eq!(chunk, ChunkOrEof::Chunk(b"He".into()));
 
                 let chunk = reader.get_next_chunk().await.unwrap();
-                assert_eq!(chunk, ChunkOrEof::Chunk(b"llo,"));
+                assert_eq!(chunk, ChunkOrEof::Chunk(b"llo,".into()));
 
                 let chunk = reader.get_next_chunk().await.unwrap();
-                assert_eq!(chunk, ChunkOrEof::Chunk(b" wor"));
+                assert_eq!(chunk, ChunkOrEof::Chunk(b" wor".into()));
 
                 let chunk = reader.get_next_chunk().await.unwrap();
-                assert_eq!(chunk, ChunkOrEof::Chunk(b"ld!"));
+                assert_eq!(chunk, ChunkOrEof::Chunk(b"ld!".into()));
 
                 let chunk = reader.get_next_chunk().await.unwrap();
                 assert_eq!(chunk, ChunkOrEof::Eof(HASH_HELLO_WORLD));
