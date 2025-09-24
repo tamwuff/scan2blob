@@ -62,11 +62,32 @@ pub struct BlobStorageSpec {
 }
 
 pub fn system_time_to_utc_rfc3339(t: std::time::SystemTime) -> String {
-    let as_time_t: u64 = t
-        .duration_since(std::time::SystemTime::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let as_duration: std::time::Duration =
+        t.duration_since(std::time::SystemTime::UNIX_EPOCH).unwrap();
+    let as_time_t: u64 = as_duration.as_secs();
+    let milliseconds: u32 = as_duration.subsec_millis();
     let as_jiff: jiff::Timestamp =
         jiff::Timestamp::from_second(as_time_t as i64).unwrap();
-    format!("{}", as_jiff)
+    let mut as_str: String = format!("{}", as_jiff);
+    assert!(matches!(as_str.pop(), Some('Z')));
+    as_str.push_str(&format!(".{:03}Z", milliseconds));
+    as_str
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn stringify_systemtime() {
+        let t = std::time::SystemTime::UNIX_EPOCH
+            + std::time::Duration::from_secs_f64(1758764290.005006);
+        let s = system_time_to_utc_rfc3339(t);
+        assert_eq!(s, "2025-09-25T01:38:10.005Z");
+
+        let t = std::time::SystemTime::UNIX_EPOCH
+            + std::time::Duration::from_secs_f64(1758764290.500600);
+        let s = system_time_to_utc_rfc3339(t);
+        assert_eq!(s, "2025-09-25T01:38:10.500Z");
+    }
 }

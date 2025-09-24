@@ -80,3 +80,11 @@ impl From<rustls::Error> for WuffError {
         }
     }
 }
+
+impl From<serde_urlencoded::de::Error> for WuffError {
+    fn from(err: serde_urlencoded::de::Error) -> WuffError {
+        WuffError {
+            message: format!("{:?}", err),
+        }
+    }
+}

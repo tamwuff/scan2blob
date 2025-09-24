@@ -1,10 +1,15 @@
 // Copied and pasted from
 // https://github.com/Eugeny/russh/blob/main/russh/examples/sftp_server.rs
 
+#[derive(Clone)]
+struct DestinationAndGate {
+    destination: std::sync::Arc<crate::destination::Destination>,
+    gate: std::sync::Arc<crate::gate::Gate>,
+}
+
 struct SshConnection {
     sftp_listener: std::sync::Arc<SftpListener>,
-    authenticated_destination:
-        Option<std::sync::Arc<crate::destination::Destination>>,
+    authenticated_destination_and_gate: Option<DestinationAndGate>,
 
     // These are channels that have been opened with SSH_MSG_CHANNEL_OPEN, but
     // not yet attached to a subsystem with SSH_MSG_CHANNEL_REQUEST. (Obviously
@@ -19,7 +24,7 @@ impl SshConnection {
     fn new(sftp_listener: &std::sync::Arc<SftpListener>) -> Self {
         Self {
             sftp_listener: std::sync::Arc::clone(sftp_listener),
-            authenticated_destination: None,
+            authenticated_destination_and_gate: None,
             pending_channels: std::collections::HashMap::new(),
         }
     }
@@ -39,10 +44,8 @@ impl russh::server::Handler for SshConnection {
                 .authorized_keys
                 .contains_key(public_key.key_data())
             {
-                println!("Tentatively accepting public key {:?}", public_key);
                 russh::server::Auth::Accept
             } else {
-                println!("Tentatively rejecting public key {:?}", public_key);
                 russh::server::Auth::reject()
             },
         )
@@ -53,18 +56,16 @@ impl russh::server::Handler for SshConnection {
         _user: &str,
         public_key: &russh::keys::ssh_key::PublicKey,
     ) -> Result<russh::server::Auth, Self::Error> {
-        let Some(destination) = self
+        let Some(destination_and_gate) = self
             .sftp_listener
             .authorized_keys
             .get(public_key.key_data())
         else {
-            println!("Rejecting public key {:?}", public_key);
             return Ok(russh::server::Auth::reject());
         };
 
-        println!("Accepting public key {:?}", public_key);
-        self.authenticated_destination =
-            Some(std::sync::Arc::clone(destination));
+        self.authenticated_destination_and_gate =
+            Some(destination_and_gate.clone());
         Ok(russh::server::Auth::Accept)
     }
 
@@ -102,8 +103,8 @@ impl russh::server::Handler for SshConnection {
             return Ok(());
         };
 
-        let Some(authenticated_destination) =
-            self.authenticated_destination.as_ref()
+        let Some(authenticated_destination_and_gate) =
+            self.authenticated_destination_and_gate.as_ref()
         else {
             session.channel_failure(channel_id)?;
             return Ok(());
@@ -111,7 +112,7 @@ impl russh::server::Handler for SshConnection {
 
         let sftp_session: SftpSession = SftpSession::new(
             &self.sftp_listener.ctx,
-            authenticated_destination,
+            authenticated_destination_and_gate,
         );
         session.channel_success(channel_id)?;
         russh_sftp::server::run(channel.into_stream(), sftp_session).await;
@@ -121,13 +122,15 @@ impl russh::server::Handler for SshConnection {
 }
 
 struct OpenFile {
+    orig_filename: String,
     writer: scan2blob::chunker::Writer,
     off: u64,
+    expected_file_size: Option<u64>,
 }
 
 struct SftpSession {
     ctx: std::sync::Arc<crate::ctx::Ctx>,
-    destination: std::sync::Arc<crate::destination::Destination>,
+    destination_and_gate: DestinationAndGate,
     open_files: std::collections::HashMap<String, OpenFile>,
     next_handle: std::sync::atomic::AtomicU64,
 }
@@ -135,11 +138,11 @@ struct SftpSession {
 impl SftpSession {
     fn new(
         ctx: &std::sync::Arc<crate::ctx::Ctx>,
-        destination: &std::sync::Arc<crate::destination::Destination>,
+        destination_and_gate: &DestinationAndGate,
     ) -> Self {
         Self {
             ctx: std::sync::Arc::clone(&ctx),
-            destination: std::sync::Arc::clone(&destination),
+            destination_and_gate: destination_and_gate.clone(),
             open_files: std::collections::HashMap::new(),
             next_handle: std::sync::atomic::AtomicU64::new(0),
         }
@@ -163,9 +166,9 @@ impl russh_sftp::server::Handler for SftpSession {
     async fn open(
         &mut self,
         id: u32,
-        _filename: String,
+        filename: String,
         pflags: russh_sftp::protocol::OpenFlags,
-        _attrs: russh_sftp::protocol::FileAttributes,
+        attrs: russh_sftp::protocol::FileAttributes,
     ) -> Result<russh_sftp::protocol::Handle, Self::Error> {
         if pflags.contains(russh_sftp::protocol::OpenFlags::READ)
             || !(pflags.contains(russh_sftp::protocol::OpenFlags::WRITE)
@@ -175,11 +178,29 @@ impl russh_sftp::server::Handler for SftpSession {
         {
             return Err(self.unimplemented());
         }
-        let writer: scan2blob::chunker::Writer = self.destination.write_file();
+        let Some(writer) = self
+            .destination_and_gate
+            .gate
+            .try_write_file(&filename, &self.destination_and_gate.destination)
+        else {
+            self.ctx.log(format!(
+                "sftp: rejecting file upload because gate {} is closed",
+                self.destination_and_gate.gate.name
+            ));
+            return Err(russh_sftp::protocol::StatusCode::PermissionDenied);
+        };
         let handle: String = self.get_next_handle();
         assert!(
             self.open_files
-                .insert(handle.clone(), OpenFile { writer, off: 0 })
+                .insert(
+                    handle.clone(),
+                    OpenFile {
+                        writer,
+                        off: 0,
+                        orig_filename: filename,
+                        expected_file_size: attrs.size
+                    }
+                )
                 .is_none()
         );
         Ok(russh_sftp::protocol::Handle { id, handle })
@@ -199,7 +220,27 @@ impl russh_sftp::server::Handler for SftpSession {
             });
         };
 
+        if let Some(expected_file_size) = open_file.expected_file_size {
+            if open_file.off != expected_file_size {
+                let msg: String = format!(
+                    "sftp: aborting upload of {}, {} bytes were written but there were supposed to be {} bytes",
+                    open_file.orig_filename, open_file.off, expected_file_size
+                );
+                self.ctx.log(&msg);
+                return Ok(russh_sftp::protocol::Status {
+                    id,
+                    status_code: russh_sftp::protocol::StatusCode::Failure,
+                    error_message: msg,
+                    language_tag: "en-US".to_string(),
+                });
+            }
+        }
+
         if let Err(err) = open_file.writer.finalize().await {
+            self.ctx.log(format!(
+                "sftp: aborting upload of {} due to propagated error: {}",
+                open_file.orig_filename, err
+            ));
             return Ok(russh_sftp::protocol::Status {
                 id,
                 status_code: russh_sftp::protocol::StatusCode::Failure,
@@ -233,6 +274,10 @@ impl russh_sftp::server::Handler for SftpSession {
         };
 
         if offset != open_file.off {
+            self.ctx.log(format!(
+                "sftp: aborting upload of {} because client attempted a random-access write, which is not supported",
+                open_file.orig_filename
+            ));
             open_file
                 .writer
                 .observe_error(scan2blob::error::WuffError::from(
@@ -248,6 +293,10 @@ impl russh_sftp::server::Handler for SftpSession {
         }
 
         if let Err(err) = open_file.writer.write(&data).await {
+            self.ctx.log(format!(
+                "sftp: aborting upload of {} due to propagated error: {}",
+                open_file.orig_filename, err
+            ));
             return Ok(russh_sftp::protocol::Status {
                 id,
                 status_code: russh_sftp::protocol::StatusCode::Failure,
@@ -366,6 +415,7 @@ impl russh::server::Server for SftpListenerEachPort {
 pub struct ConfigListenerSftpAuthorizedKey {
     public_key: String,
     destination: String,
+    gate: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -384,7 +434,7 @@ pub struct SftpListener {
     // have to use this freakish KeyData thing...
     authorized_keys: std::collections::HashMap<
         internal_russh_forked_ssh_key::public::KeyData,
-        std::sync::Arc<crate::destination::Destination>,
+        DestinationAndGate,
     >,
     auth_methods: russh::MethodSet,
 }
@@ -394,6 +444,7 @@ impl SftpListener {
         ctx: &std::sync::Arc<crate::ctx::Ctx>,
         config: &ConfigListenerSftp,
         destinations: &crate::destination::Destinations,
+        gates: &crate::gate::Gates,
     ) -> Result<Self, scan2blob::error::WuffError> {
         let host_key: String = config.host_key.get()?;
         // Can't use the ? operator on russh::keys::PrivateKey::from_openssh()
@@ -409,11 +460,12 @@ impl SftpListener {
             };
         let mut authorized_keys: std::collections::HashMap<
             internal_russh_forked_ssh_key::public::KeyData,
-            std::sync::Arc<crate::destination::Destination>,
+            DestinationAndGate,
         > = std::collections::HashMap::new();
         for ConfigListenerSftpAuthorizedKey {
             public_key,
             destination,
+            gate,
         } in &config.authorized_keys
         {
             // Can't use the ? operator on russh::keys::PublicKey::from_openssh
@@ -432,9 +484,16 @@ impl SftpListener {
                     "Destination not found",
                 ));
             };
-            println!("Authorizing public key {:?}", public_key);
+            let Some(gate) = gates.get(gate) else {
+                return Err(scan2blob::error::WuffError::from(
+                    "Gate not found",
+                ));
+            };
             if authorized_keys
-                .insert(public_key.key_data().clone(), destination)
+                .insert(
+                    public_key.key_data().clone(),
+                    DestinationAndGate { destination, gate },
+                )
                 .is_some()
             {
                 return Err(scan2blob::error::WuffError::from(

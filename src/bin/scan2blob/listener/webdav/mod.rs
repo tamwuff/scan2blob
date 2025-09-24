@@ -2,6 +2,12 @@
 // https://github.com/rustls/hyper-rustls/blob/main/examples/server.rs and
 // https://github.com/messense/dav-server-rs/blob/main/README.md
 
+#[derive(Clone)]
+struct DestinationAndGate {
+    destination: std::sync::Arc<crate::destination::Destination>,
+    gate: std::sync::Arc<crate::gate::Gate>,
+}
+
 #[derive(Debug, Clone)]
 struct FileMetadata(u64);
 
@@ -34,8 +40,10 @@ impl dav_server::fs::DavMetaData for DirMetadata {
 
 struct OpenFile {
     webdav_listener: std::sync::Arc<WebdavListener>,
+    orig_filename: String,
     writer: Option<scan2blob::chunker::Writer>,
     off: u64,
+    expected_file_size: u64,
 }
 
 impl dav_server::fs::DavFile for OpenFile {
@@ -65,7 +73,10 @@ impl dav_server::fs::DavFile for OpenFile {
                 let chunk_len: usize = chunk.len();
 
                 if let Err(err) = writer.write(chunk).await {
-                    // log error
+                    self.webdav_listener.ctx.log(format!(
+                        "webdav: aborting upload of {} due to propagated error: {}",
+                        self.orig_filename, err
+                    ));
                     return Err(dav_server::fs::FsError::GeneralFailure);
                 }
                 self.off += chunk_len as u64;
@@ -83,7 +94,10 @@ impl dav_server::fs::DavFile for OpenFile {
                 self.writer.as_mut().unwrap();
             let as_slice: &[u8] = buf.as_ref();
             if let Err(err) = writer.write(as_slice).await {
-                // log error
+                self.webdav_listener.ctx.log(format!(
+                    "webdav: aborting upload of {} due to propagated error: {}",
+                    self.orig_filename, err
+                ));
                 return Err(dav_server::fs::FsError::GeneralFailure);
             }
             self.off += as_slice.len() as u64;
@@ -92,20 +106,30 @@ impl dav_server::fs::DavFile for OpenFile {
     }
     fn read_bytes(
         &mut self,
-        count: usize,
+        _count: usize,
     ) -> dav_server::fs::FsFuture<bytes::Bytes> {
         Box::pin(async move { Err(dav_server::fs::FsError::NotImplemented) })
     }
     fn seek(
         &mut self,
-        pos: std::io::SeekFrom,
+        _pos: std::io::SeekFrom,
     ) -> dav_server::fs::FsFuture<u64> {
+        self.webdav_listener.ctx.log(format!(
+            "webdav: aborting upload of {} because client attempted a seek, which is not supported",
+            self.orig_filename
+        ));
+        self.writer.as_ref().unwrap().observe_error(
+            scan2blob::error::WuffError::from(
+                "webdav client attempted seek, which is not supported",
+            ),
+        );
         Box::pin(async move { Err(dav_server::fs::FsError::NotImplemented) })
     }
     fn flush(&mut self) -> dav_server::fs::FsFuture<()> {
         Box::pin(async move { Ok(()) })
     }
 }
+
 impl Drop for OpenFile {
     fn drop(&mut self) {
         let async_spawner =
@@ -113,9 +137,23 @@ impl Drop for OpenFile {
         let Some(mut writer) = self.writer.take() else {
             return;
         };
+        if self.off != self.expected_file_size {
+            let msg: String = format!(
+                "webdav: aborting upload of {}, {} bytes were written but there were supposed to be {} bytes",
+                self.orig_filename, self.off, self.expected_file_size
+            );
+            self.webdav_listener.ctx.log(msg);
+        }
+        let webdav_listener: std::sync::Arc<WebdavListener> =
+            std::sync::Arc::clone(&self.webdav_listener);
+        let mut orig_filename: String = String::new();
+        std::mem::swap(&mut orig_filename, &mut self.orig_filename);
         async_spawner.spawn(async move {
             if let Err(err) = writer.finalize().await {
-                // log error
+                webdav_listener.ctx.log(format!(
+                    "webdav: aborting upload of {} due to propagated error: {}",
+                    orig_filename, err
+                ));
             }
         });
     }
@@ -144,19 +182,18 @@ impl std::fmt::Debug for OpenFile {
 #[derive(Clone)]
 struct WebdavFilesystem(std::sync::Arc<WebdavListener>);
 
-impl
-    dav_server::fs::GuardedFileSystem<
-        std::sync::Arc<crate::destination::Destination>,
-    > for WebdavFilesystem
+impl dav_server::fs::GuardedFileSystem<DestinationAndGate>
+    for WebdavFilesystem
 {
     fn open(
         &self,
-        _path: &dav_server::davpath::DavPath,
+        path: &dav_server::davpath::DavPath,
         options: dav_server::fs::OpenOptions,
-        destination: &std::sync::Arc<crate::destination::Destination>,
+        destination_and_gate: &DestinationAndGate,
     ) -> dav_server::fs::FsFuture<Box<dyn dav_server::fs::DavFile>> {
-        let destination: std::sync::Arc<crate::destination::Destination> =
-            std::sync::Arc::clone(destination);
+        let destination_and_gate = destination_and_gate.clone();
+        let orig_filename: Option<String> =
+            path.file_name().map(ToOwned::to_owned);
         Box::pin(async move {
             if options.read
                 || !(options.write || options.append)
@@ -164,14 +201,34 @@ impl
             {
                 return Err(dav_server::fs::FsError::NotImplemented);
             }
+            let Some(orig_filename) = orig_filename else {
+                return Err(dav_server::fs::FsError::NotFound);
+            };
+            let Some(expected_file_size) = options.size else {
+                self.0.ctx.log(
+                    "webdav: attempted to open a file for writing without providing an expected size",
+                );
+                return Err(dav_server::fs::FsError::NotImplemented);
+            };
 
-            let writer: scan2blob::chunker::Writer = destination.write_file();
+            let Some(writer) = destination_and_gate.gate.try_write_file(
+                &orig_filename,
+                &destination_and_gate.destination,
+            ) else {
+                self.0.ctx.log(format!(
+                    "webdav: rejecting file upload because gate {} is closed",
+                    destination_and_gate.gate.name
+                ));
+                return Err(dav_server::fs::FsError::Forbidden);
+            };
             let webdav_listener: std::sync::Arc<WebdavListener> =
                 std::sync::Arc::clone(&self.0);
             let open_file: OpenFile = OpenFile {
                 webdav_listener,
+                orig_filename,
                 writer: Some(writer),
                 off: 0,
+                expected_file_size,
             };
             let boxed_open_file: Box<dyn dav_server::fs::DavFile> =
                 Box::new(open_file);
@@ -183,7 +240,7 @@ impl
         &self,
         _path: &dav_server::davpath::DavPath,
         _meta: dav_server::fs::ReadDirMeta,
-        _destination: &std::sync::Arc<crate::destination::Destination>,
+        _destination_and_gate: &DestinationAndGate,
     ) -> dav_server::fs::FsFuture<
         dav_server::fs::FsStream<Box<dyn dav_server::fs::DavDirEntry>>,
     > {
@@ -199,10 +256,9 @@ impl
     fn metadata(
         &self,
         _path: &dav_server::davpath::DavPath,
-        _destination: &std::sync::Arc<crate::destination::Destination>,
+        _destination_and_gate: &DestinationAndGate,
     ) -> dav_server::fs::FsFuture<Box<dyn dav_server::fs::DavMetaData>> {
         Box::pin(async move {
-            let metadata: DirMetadata = DirMetadata;
             let boxed_metadata: Box<dyn dav_server::fs::DavMetaData> =
                 Box::new(DirMetadata);
             Ok(boxed_metadata)
@@ -212,7 +268,7 @@ impl
     fn create_dir(
         &self,
         _path: &dav_server::davpath::DavPath,
-        _destination: &std::sync::Arc<crate::destination::Destination>,
+        _destination_and_gate: &DestinationAndGate,
     ) -> dav_server::fs::FsFuture<()> {
         Box::pin(async move { Ok(()) })
     }
@@ -220,7 +276,7 @@ impl
     fn remove_dir(
         &self,
         _path: &dav_server::davpath::DavPath,
-        _destination: &std::sync::Arc<crate::destination::Destination>,
+        _destination_and_gate: &DestinationAndGate,
     ) -> dav_server::fs::FsFuture<()> {
         Box::pin(async move { Ok(()) })
     }
@@ -228,7 +284,7 @@ impl
     fn remove_file(
         &self,
         _path: &dav_server::davpath::DavPath,
-        _destination: &std::sync::Arc<crate::destination::Destination>,
+        _destination_and_gate: &DestinationAndGate,
     ) -> dav_server::fs::FsFuture<()> {
         Box::pin(async move { Ok(()) })
     }
@@ -237,24 +293,26 @@ impl
         &self,
         _from: &dav_server::davpath::DavPath,
         _to: &dav_server::davpath::DavPath,
-        _destination: &std::sync::Arc<crate::destination::Destination>,
+        _destination_and_gate: &DestinationAndGate,
     ) -> dav_server::fs::FsFuture<()> {
         Box::pin(async move { Ok(()) })
     }
 
+    #[cfg(feature = "webdav-props")]
     fn have_props(
         &self,
         _path: &dav_server::davpath::DavPath,
-        _destination: &std::sync::Arc<crate::destination::Destination>,
+        _destination_and_gate: &DestinationAndGate,
     ) -> std::pin::Pin<Box<dyn Future<Output = bool> + Send>> {
         Box::pin(async move { true })
     }
 
+    #[cfg(feature = "webdav-props")]
     fn patch_props(
         &self,
         _path: &dav_server::davpath::DavPath,
         patch: Vec<(bool, dav_server::fs::DavProp)>,
-        _destination: &std::sync::Arc<crate::destination::Destination>,
+        _destination_and_gate: &DestinationAndGate,
     ) -> dav_server::fs::FsFuture<
         Vec<(hyper::StatusCode, dav_server::fs::DavProp)>,
     > {
@@ -266,20 +324,22 @@ impl
         })
     }
 
+    #[cfg(feature = "webdav-props")]
     fn get_props(
         &self,
         _path: &dav_server::davpath::DavPath,
         _do_content: bool,
-        _destination: &std::sync::Arc<crate::destination::Destination>,
+        _destination_and_gate: &DestinationAndGate,
     ) -> dav_server::fs::FsFuture<Vec<dav_server::fs::DavProp>> {
         Box::pin(async move { Ok(Vec::new()) })
     }
 
+    #[cfg(feature = "webdav-props")]
     fn get_prop(
         &self,
         _path: &dav_server::davpath::DavPath,
         prop: dav_server::fs::DavProp,
-        destination: &std::sync::Arc<crate::destination::Destination>,
+        _destination_and_gate: &DestinationAndGate,
     ) -> dav_server::fs::FsFuture<Vec<u8>> {
         Box::pin(async move { Err(dav_server::fs::FsError::NotFound) })
     }
@@ -292,11 +352,9 @@ struct WebdavListenerEachPort {
 
 impl WebdavListenerEachPort {
     async fn run(
-        mut self,
+        self,
         dav_handler: std::sync::Arc<
-            dav_server::DavHandler<
-                std::sync::Arc<crate::destination::Destination>,
-            >,
+            dav_server::DavHandler<DestinationAndGate>,
         >,
     ) -> ! {
         let async_spawner =
@@ -326,6 +384,7 @@ impl WebdavListenerEachPort {
 pub struct ConfigListenerWebdavUser {
     password: String,
     destination: String,
+    gate: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -338,7 +397,7 @@ pub struct ConfigListenerWebdav {
 
 struct WebdavListenerUser {
     password: String,
-    destination: std::sync::Arc<crate::destination::Destination>,
+    destination_and_gate: DestinationAndGate,
 }
 
 pub struct WebdavListener {
@@ -348,7 +407,7 @@ pub struct WebdavListener {
     hyper_builder:
         hyper_util::server::conn::auto::Builder<hyper_util::rt::TokioExecutor>,
     users: std::collections::HashMap<String, WebdavListenerUser>,
-    basic_auth_regex: regex::Regex,
+    http_basic_auth: scan2blob::http_basic_auth::HttpBasicAuth,
 }
 
 impl WebdavListener {
@@ -356,6 +415,7 @@ impl WebdavListener {
         ctx: &std::sync::Arc<crate::ctx::Ctx>,
         config: &ConfigListenerWebdav,
         destinations: &crate::destination::Destinations,
+        gates: &crate::gate::Gates,
     ) -> Result<Self, scan2blob::error::WuffError> {
         let mut certificate_chain_data: std::io::Cursor<Vec<u8>> =
             std::io::Cursor::new(config.certificate_chain.get()?.into_bytes());
@@ -381,6 +441,7 @@ impl WebdavListener {
             ConfigListenerWebdavUser {
                 password,
                 destination,
+                gate,
             },
         ) in &config.users
         {
@@ -389,11 +450,19 @@ impl WebdavListener {
                     "Destination not found",
                 ));
             };
+            let Some(gate) = gates.get(gate) else {
+                return Err(scan2blob::error::WuffError::from(
+                    "Gate not found",
+                ));
+            };
             let _ = users.insert(
                 username.clone(),
                 WebdavListenerUser {
                     password: password.clone(),
-                    destination,
+                    destination_and_gate: DestinationAndGate {
+                        destination,
+                        gate,
+                    },
                 },
             );
         }
@@ -412,24 +481,22 @@ impl WebdavListener {
         let hyper_builder: hyper_util::server::conn::auto::Builder<
             hyper_util::rt::TokioExecutor,
         > = hyper_util::server::conn::auto::Builder::new(hyper_executor);
-        let basic_auth_regex: regex::Regex =
-            regex::Regex::new(r"^\s*Basic\s+(.+?)\s*$").expect("regex");
+        let http_basic_auth: scan2blob::http_basic_auth::HttpBasicAuth =
+            scan2blob::http_basic_auth::HttpBasicAuth::new();
         Ok(Self {
             ctx: std::sync::Arc::clone(ctx),
             listen_on: config.listen_on.clone(),
             rustls_acceptor,
             hyper_builder,
             users,
-            basic_auth_regex,
+            http_basic_auth,
         })
     }
 
     pub fn start(self: &std::sync::Arc<Self>) {
         let async_spawner = self.ctx.base_ctx.get_async_spawner();
         let dav_handler: std::sync::Arc<
-            dav_server::DavHandler<
-                std::sync::Arc<crate::destination::Destination>,
-            >,
+            dav_server::DavHandler<DestinationAndGate>,
         > = std::sync::Arc::new(
             dav_server::DavHandler::builder()
                 .filesystem(Box::new(WebdavFilesystem(std::sync::Arc::clone(
@@ -453,9 +520,7 @@ impl WebdavListener {
     async fn handle_connection(
         self: std::sync::Arc<Self>,
         dav_handler: std::sync::Arc<
-            dav_server::DavHandler<
-                std::sync::Arc<crate::destination::Destination>,
-            >,
+            dav_server::DavHandler<DestinationAndGate>,
         >,
         sock: tokio::net::TcpStream,
     ) {
@@ -474,9 +539,7 @@ impl WebdavListener {
         let hyper_service = hyper::service::service_fn({
             let self_: std::sync::Arc<Self> = std::sync::Arc::clone(&self);
             let dav_handler: std::sync::Arc<
-                dav_server::DavHandler<
-                    std::sync::Arc<crate::destination::Destination>,
-                >,
+                dav_server::DavHandler<DestinationAndGate>,
             > = std::sync::Arc::clone(&dav_handler);
             move |req| {
                 std::sync::Arc::clone(&self_)
@@ -497,9 +560,7 @@ impl WebdavListener {
     async fn handle_request<ReqBody, ReqData, ReqError>(
         self: std::sync::Arc<Self>,
         dav_handler: std::sync::Arc<
-            dav_server::DavHandler<
-                std::sync::Arc<crate::destination::Destination>,
-            >,
+            dav_server::DavHandler<DestinationAndGate>,
         >,
         req: hyper::Request<ReqBody>,
     ) -> Result<hyper::Response<dav_server::body::Body>, hyper::http::Error>
@@ -510,17 +571,16 @@ impl WebdavListener {
     {
         let headers: &hyper::HeaderMap = req.headers();
 
-        let destination: Option<
-            std::sync::Arc<crate::destination::Destination>,
-        > = if let Some(auth_header) =
-            headers.get(hyper::header::AUTHORIZATION)
-        {
-            self.check_auth(auth_header)
-        } else {
-            None
-        };
+        let destination_and_gate: Option<DestinationAndGate> =
+            if let Some(auth_header) =
+                headers.get(hyper::header::AUTHORIZATION)
+            {
+                self.check_auth(auth_header)
+            } else {
+                None
+            };
 
-        let Some(destination) = destination else {
+        let Some(destination_and_gate) = destination_and_gate else {
             return hyper::Response::builder()
                 .status(hyper::StatusCode::UNAUTHORIZED)
                 .header(
@@ -530,46 +590,33 @@ impl WebdavListener {
                 .body(dav_server::body::Body::empty());
         };
 
-        Ok(dav_handler.handle_guarded(req, destination).await)
+        Ok(dav_handler.handle_guarded(req, destination_and_gate).await)
     }
 
     fn check_auth(
         &self,
         auth_header: &hyper::header::HeaderValue,
-    ) -> Option<std::sync::Arc<crate::destination::Destination>> {
+    ) -> Option<DestinationAndGate> {
         let Ok(auth_header) = auth_header.to_str() else {
             return None;
         };
 
-        let Some(m) = self.basic_auth_regex.captures(auth_header) else {
-            return None;
-        };
-
-        let Ok(userpass) = base64::Engine::decode(
-            &base64::prelude::BASE64_STANDARD,
-            m.get(1).unwrap().as_str(),
-        ) else {
-            return None;
-        };
-
-        let Ok(userpass) = String::from_utf8(userpass) else {
-            return None;
-        };
-
-        let Some((username, plaintext)) = userpass.split_once(':') else {
+        let Some((username, plaintext)) =
+            self.http_basic_auth.parse(auth_header)
+        else {
             return None;
         };
 
         let Some(WebdavListenerUser {
             password,
-            destination,
-        }) = self.users.get(username)
+            destination_and_gate,
+        }) = self.users.get(&username)
         else {
             return None;
         };
 
-        if scan2blob::pwhash::verify(plaintext, password) {
-            Some(std::sync::Arc::clone(destination))
+        if scan2blob::pwhash::verify(&plaintext, password) {
+            Some(destination_and_gate.clone())
         } else {
             None
         }

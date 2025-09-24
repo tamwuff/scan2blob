@@ -1,12 +1,23 @@
 mod ctx;
 mod destination;
+mod gate;
 mod listener;
+mod mime_types;
 
 async fn async_main(
     ctx: std::sync::Arc<crate::ctx::Ctx>,
 ) -> Result<(), scan2blob::error::WuffError> {
     let destinations: destination::Destinations =
         destination::Destinations::new(&ctx)?;
+    let gates: gate::Gates = gate::Gates::new(&ctx)?;
+    for (gate_name, gate_cfg) in &ctx.config.gates {
+        let gate: std::sync::Arc<gate::Gate> = gates.get(gate_name).unwrap();
+        if let Some(ref web_ui_cfg) = gate_cfg.web_ui {
+            let web_ui: gate::web::GateWebListener =
+                gate::web::GateWebListener::new(&ctx, &gate, web_ui_cfg)?;
+            std::sync::Arc::new(web_ui).start();
+        }
+    }
     for listener_cfg in &ctx.config.listeners {
         match listener_cfg {
             ctx::ConfigListener::Sftp(listener_cfg) => {
@@ -15,6 +26,7 @@ async fn async_main(
                         &ctx,
                         listener_cfg,
                         &destinations,
+                        &gates,
                     )?;
                 std::sync::Arc::new(listener).start();
             }
@@ -24,6 +36,7 @@ async fn async_main(
                         &ctx,
                         listener_cfg,
                         &destinations,
+                        &gates,
                     )?;
                 std::sync::Arc::new(listener).start();
             }

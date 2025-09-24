@@ -18,3 +18,11 @@ and have scan2blob load the key from there, too.
 
 (Public SSH keys don't have this problem because they're always a single line
 of text, so they can be pasted between double quotes with no hassle)
+
+Appendix:
+
+Here are some useful URLs:
+https://datatracker.ietf.org/doc/html/rfc4254
+https://datatracker.ietf.org/doc/html/rfc4252
+https://datatracker.ietf.org/doc/html/draft-ietf-secsh-filexfer-02
+https://datatracker.ietf.org/doc/html/rfc4918
