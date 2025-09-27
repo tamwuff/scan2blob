@@ -73,7 +73,7 @@ impl dav_server::fs::DavFile for OpenFile {
                 let chunk_len: usize = chunk.len();
 
                 if let Err(err) = writer.write(chunk).await {
-                    self.webdav_listener.ctx.log(format!(
+                    self.webdav_listener.ctx.log_info(format!(
                         "webdav: aborting upload of {} due to propagated error: {}",
                         self.orig_filename, err
                     ));
@@ -94,7 +94,7 @@ impl dav_server::fs::DavFile for OpenFile {
                 self.writer.as_mut().unwrap();
             let as_slice: &[u8] = buf.as_ref();
             if let Err(err) = writer.write(as_slice).await {
-                self.webdav_listener.ctx.log(format!(
+                self.webdav_listener.ctx.log_info(format!(
                     "webdav: aborting upload of {} due to propagated error: {}",
                     self.orig_filename, err
                 ));
@@ -114,7 +114,7 @@ impl dav_server::fs::DavFile for OpenFile {
         &mut self,
         _pos: std::io::SeekFrom,
     ) -> dav_server::fs::FsFuture<u64> {
-        self.webdav_listener.ctx.log(format!(
+        self.webdav_listener.ctx.log_info(format!(
             "webdav: aborting upload of {} because client attempted a seek, which is not supported",
             self.orig_filename
         ));
@@ -142,7 +142,7 @@ impl Drop for OpenFile {
                 "webdav: aborting upload of {}, {} bytes were written but there were supposed to be {} bytes",
                 self.orig_filename, self.off, self.expected_file_size
             );
-            self.webdav_listener.ctx.log(msg);
+            self.webdav_listener.ctx.log_info(msg);
         }
         let webdav_listener: std::sync::Arc<WebdavListener> =
             std::sync::Arc::clone(&self.webdav_listener);
@@ -150,7 +150,7 @@ impl Drop for OpenFile {
         std::mem::swap(&mut orig_filename, &mut self.orig_filename);
         async_spawner.spawn(async move {
             if let Err(err) = writer.finalize().await {
-                webdav_listener.ctx.log(format!(
+                webdav_listener.ctx.log_info(format!(
                     "webdav: aborting upload of {} due to propagated error: {}",
                     orig_filename, err
                 ));
@@ -205,7 +205,7 @@ impl dav_server::fs::GuardedFileSystem<DestinationAndGate>
                 return Err(dav_server::fs::FsError::NotFound);
             };
             let Some(expected_file_size) = options.size else {
-                self.0.ctx.log(
+                self.0.ctx.log_info(
                     "webdav: attempted to open a file for writing without providing an expected size",
                 );
                 return Err(dav_server::fs::FsError::NotImplemented);
@@ -215,7 +215,7 @@ impl dav_server::fs::GuardedFileSystem<DestinationAndGate>
                 &orig_filename,
                 &destination_and_gate.destination,
             ) else {
-                self.0.ctx.log(format!(
+                self.0.ctx.log_info(format!(
                     "webdav: rejecting file upload because gate {} is closed",
                     destination_and_gate.gate.name
                 ));
@@ -356,7 +356,7 @@ impl WebdavListenerEachPort {
         dav_handler: std::sync::Arc<
             dav_server::DavHandler<DestinationAndGate>,
         >,
-    ) -> ! {
+    ) {
         let async_spawner =
             self.webdav_listener.ctx.base_ctx.get_async_spawner();
         let server_sock: tokio::net::TcpListener =
@@ -494,7 +494,6 @@ impl WebdavListener {
     }
 
     pub fn start(self: &std::sync::Arc<Self>) {
-        let async_spawner = self.ctx.base_ctx.get_async_spawner();
         let dav_handler: std::sync::Arc<
             dav_server::DavHandler<DestinationAndGate>,
         > = std::sync::Arc::new(
@@ -507,7 +506,8 @@ impl WebdavListener {
         );
 
         for listen_on in &self.listen_on {
-            async_spawner.spawn(
+            self.ctx.spawn_critical(
+                "webdav",
                 WebdavListenerEachPort {
                     webdav_listener: std::sync::Arc::clone(self),
                     listen_on: *listen_on,

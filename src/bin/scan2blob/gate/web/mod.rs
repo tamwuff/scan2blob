@@ -136,7 +136,7 @@ struct GateWebListenerEachPort {
 }
 
 impl GateWebListenerEachPort {
-    async fn run(self) -> ! {
+    async fn run(self) {
         let async_spawner = self.web_listener.ctx.base_ctx.get_async_spawner();
         let server_sock: tokio::net::TcpListener =
             tokio::net::TcpListener::bind(&self.listen_on)
@@ -231,9 +231,9 @@ impl GateWebListener {
     }
 
     pub fn start(self: &std::sync::Arc<Self>) {
-        let async_spawner = self.ctx.base_ctx.get_async_spawner();
         for listen_on in &self.listen_on {
-            async_spawner.spawn(
+            self.ctx.spawn_critical(
+                format!("web ui for gate {}", self.gate.name),
                 GateWebListenerEachPort {
                     web_listener: std::sync::Arc::clone(self),
                     listen_on: *listen_on,

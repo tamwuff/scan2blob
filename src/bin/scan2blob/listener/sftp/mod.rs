@@ -183,7 +183,7 @@ impl russh_sftp::server::Handler for SftpSession {
             .gate
             .try_write_file(&filename, &self.destination_and_gate.destination)
         else {
-            self.ctx.log(format!(
+            self.ctx.log_info(format!(
                 "sftp: rejecting file upload because gate {} is closed",
                 self.destination_and_gate.gate.name
             ));
@@ -226,7 +226,7 @@ impl russh_sftp::server::Handler for SftpSession {
                     "sftp: aborting upload of {}, {} bytes were written but there were supposed to be {} bytes",
                     open_file.orig_filename, open_file.off, expected_file_size
                 );
-                self.ctx.log(&msg);
+                self.ctx.log_info(&msg);
                 return Ok(russh_sftp::protocol::Status {
                     id,
                     status_code: russh_sftp::protocol::StatusCode::Failure,
@@ -237,7 +237,7 @@ impl russh_sftp::server::Handler for SftpSession {
         }
 
         if let Err(err) = open_file.writer.finalize().await {
-            self.ctx.log(format!(
+            self.ctx.log_info(format!(
                 "sftp: aborting upload of {} due to propagated error: {}",
                 open_file.orig_filename, err
             ));
@@ -274,7 +274,7 @@ impl russh_sftp::server::Handler for SftpSession {
         };
 
         if offset != open_file.off {
-            self.ctx.log(format!(
+            self.ctx.log_info(format!(
                 "sftp: aborting upload of {} because client attempted a random-access write, which is not supported",
                 open_file.orig_filename
             ));
@@ -293,7 +293,7 @@ impl russh_sftp::server::Handler for SftpSession {
         }
 
         if let Err(err) = open_file.writer.write(&data).await {
-            self.ctx.log(format!(
+            self.ctx.log_info(format!(
                 "sftp: aborting upload of {} due to propagated error: {}",
                 open_file.orig_filename, err
             ));
@@ -381,7 +381,7 @@ struct SftpListenerEachPort {
 }
 
 impl SftpListenerEachPort {
-    async fn run(mut self) -> ! {
+    async fn run(mut self) {
         let russh_config: russh::server::Config = russh::server::Config {
             methods: self.sftp_listener.auth_methods.clone(),
             keys: vec![self.sftp_listener.host_key.clone()],
@@ -513,10 +513,9 @@ impl SftpListener {
     }
 
     pub fn start(self: &std::sync::Arc<Self>) {
-        let async_spawner = self.ctx.base_ctx.get_async_spawner();
-
         for listen_on in &self.listen_on {
-            async_spawner.spawn(
+            self.ctx.spawn_critical(
+                "sftp",
                 SftpListenerEachPort {
                     sftp_listener: std::sync::Arc::clone(self),
                     listen_on: *listen_on,

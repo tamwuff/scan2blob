@@ -88,3 +88,11 @@ impl From<serde_urlencoded::de::Error> for WuffError {
         }
     }
 }
+
+impl From<daemonize::Error> for WuffError {
+    fn from(err: daemonize::Error) -> WuffError {
+        WuffError {
+            message: format!("{:?}", err),
+        }
+    }
+}

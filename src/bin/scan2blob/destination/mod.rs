@@ -72,14 +72,16 @@ impl Destination {
             MAX_NUM_CHUNKS,
         );
 
-        let async_spawner = self.ctx.base_ctx.get_async_spawner();
-        async_spawner.spawn(std::sync::Arc::clone(self).do_upload(
-            reader,
-            now,
-            name_hint,
-            suffix,
-            content_type,
-        ));
+        self.ctx.spawn_critical(
+            format!("destination {}", self.name),
+            std::sync::Arc::clone(self).do_upload(
+                reader,
+                now,
+                name_hint,
+                suffix,
+                content_type,
+            ),
+        );
 
         writer
     }
@@ -113,7 +115,7 @@ impl Destination {
         let hash: [u8; 16] = loop {
             let chunk: Vec<u8> = match reader.get_next_chunk().await {
                 Err(err) => {
-                    self.ctx.log(format!(
+                    self.ctx.log_info(format!(
                         "{}: aborting upload of {} due to propagated error: {}",
                         self.name, blob_name, err
                     ));
@@ -141,7 +143,7 @@ impl Destination {
             if let Err(e) =
                 blob_client.put_block(block_id, chunk).into_future().await
             {
-                self.ctx.log(format!(
+                self.ctx.log_info(format!(
                     "{}: upload of {} failed: {}",
                     self.name, blob_name, e
                 ));
@@ -159,7 +161,7 @@ impl Destination {
             .into_future()
             .await
         {
-            self.ctx.log(format!(
+            self.ctx.log_info(format!(
                 "{}: upload of {} failed: {}",
                 self.name, blob_name, e
             ));
@@ -168,7 +170,7 @@ impl Destination {
         }
 
         if let Err(e) = reader.finalize().await {
-            self.ctx.log(format!(
+            self.ctx.log_info(format!(
                 "{}: aborting upload of {} due to propagated error: {}",
                 self.name, blob_name, e
             ));
