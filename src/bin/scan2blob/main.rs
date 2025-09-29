@@ -121,7 +121,7 @@ fn main() {
         .base_ctx
         .run_async_main(async_main(std::sync::Arc::clone(&ctx)))
     {
-        ctx.log_err(format!("{}", err));
+        ctx.log_info(format!("{}", err));
         std::process::exit(1);
     }
 }

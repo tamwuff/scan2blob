@@ -6,6 +6,10 @@ edition = "2024"
 [features]
 webdav-props = []
 
+[profile.release]
+codegen-units = 1
+lto = true
+
 [dependencies]
 azure_core = "0.21.0"
 azure_storage = "0.21.0"

@@ -1,0 +1,20 @@
+#!/bin/sh
+
+# PROVIDE: scan2blob
+# REQUIRE: LOGIN
+
+. /etc/rc.subr
+
+name="scan2blob"
+rcvar="${name}_enable"
+
+load_rc_config $name
+: ${scan2blob_config:="/usr/local/etc/scan2blob.json"}
+
+required_files="${scan2blob_config}"
+pidfile="/var/run/${name}.pid"
+
+command="/usr/local/sbin/scan2blob"
+command_args="-p ${pidfile} -c ${scan2blob_config}"
+
+run_rc_command "$1"
