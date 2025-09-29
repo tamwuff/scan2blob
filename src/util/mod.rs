@@ -13,18 +13,22 @@ pub enum LiteralOrEnvironmentVariable {
     EnvironmentVariable { env: String },
 }
 
-impl LiteralOrEnvironmentVariable {
-    pub fn get(&self) -> Result<String, crate::error::WuffError> {
-        match self {
-            Self::Literal(s) => Ok(s.clone()),
-            Self::EnvironmentVariable { env: env_var_name } => {
-                std::env::var(env_var_name).map_err(|_| {
-                    crate::error::WuffError::from(format!(
-                        "{}: environment variable not found",
-                        env_var_name
-                    ))
-                })
-            }
+impl TryFrom<LiteralOrEnvironmentVariable> for String {
+    type Error = crate::error::WuffError;
+
+    fn try_from(
+        loev: LiteralOrEnvironmentVariable,
+    ) -> Result<Self, crate::error::WuffError> {
+        match loev {
+            LiteralOrEnvironmentVariable::Literal(s) => Ok(s.clone()),
+            LiteralOrEnvironmentVariable::EnvironmentVariable {
+                env: env_var_name,
+            } => std::env::var(&env_var_name).map_err(|_| {
+                crate::error::WuffError::from(format!(
+                    "{}: environment variable not found",
+                    env_var_name
+                ))
+            }),
         }
     }
 }
@@ -36,12 +40,14 @@ pub enum LiteralOrFile {
     File { file: std::path::PathBuf },
 }
 
-impl LiteralOrFile {
-    pub fn get(&self) -> Result<String, crate::error::WuffError> {
-        match self {
-            Self::Literal(s) => Ok(s.clone()),
-            Self::File { file: filename } => {
-                let data: Vec<u8> = std::fs::read(filename)?;
+impl TryFrom<LiteralOrFile> for String {
+    type Error = crate::error::WuffError;
+
+    fn try_from(lof: LiteralOrFile) -> Result<Self, crate::error::WuffError> {
+        match lof {
+            LiteralOrFile::Literal(s) => Ok(s.clone()),
+            LiteralOrFile::File { file: filename } => {
+                let data: Vec<u8> = std::fs::read(&filename)?;
                 String::from_utf8(data).map_err(|_| {
                     crate::error::WuffError::from(format!(
                         "{:?} contains non-UTF8 data",
@@ -59,6 +65,34 @@ pub struct BlobStorageSpec {
     pub container: String,
     pub sas: LiteralOrEnvironmentVariable,
     pub prefix: String,
+}
+
+pub struct BlobStorageSpecEnriched {
+    pub storage_account: String,
+    pub container: String,
+    pub sas: String,
+    pub prefix: String,
+}
+
+impl TryFrom<BlobStorageSpec> for BlobStorageSpecEnriched {
+    type Error = crate::error::WuffError;
+
+    fn try_from(
+        config: BlobStorageSpec,
+    ) -> Result<Self, crate::error::WuffError> {
+        let BlobStorageSpec {
+            storage_account,
+            container,
+            sas,
+            prefix,
+        } = config;
+        Ok(Self {
+            storage_account,
+            container,
+            sas: sas.try_into()?,
+            prefix,
+        })
+    }
 }
 
 pub fn system_time_to_utc_rfc3339(t: std::time::SystemTime) -> String {

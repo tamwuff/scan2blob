@@ -13,6 +13,40 @@ pub struct ConfigGate {
 
 pub type ConfigGates = std::collections::HashMap<String, ConfigGate>;
 
+pub struct ConfigGateEnriched {
+    pub default_open: bool,
+    pub timed_assertion_lifetime: u32,
+    pub name_hint_lifetime: u32,
+    pub web_ui: Option<web::ConfigGateWebEnriched>,
+}
+
+impl TryFrom<ConfigGate> for ConfigGateEnriched {
+    type Error = scan2blob::error::WuffError;
+    fn try_from(
+        config: ConfigGate,
+    ) -> Result<Self, scan2blob::error::WuffError> {
+        let ConfigGate {
+            default_open,
+            timed_assertion_lifetime,
+            name_hint_lifetime,
+            web_ui,
+        } = config;
+        Ok(Self {
+            default_open,
+            timed_assertion_lifetime,
+            name_hint_lifetime,
+            web_ui: if let Some(web_ui) = web_ui {
+                Some(web_ui.try_into()?)
+            } else {
+                None
+            },
+        })
+    }
+}
+
+pub type ConfigGatesEnriched =
+    std::collections::HashMap<String, ConfigGateEnriched>;
+
 fn default_default_open() -> bool {
     false
 }
@@ -111,7 +145,7 @@ impl Gate {
     pub fn new(
         ctx: &std::sync::Arc<crate::ctx::Ctx>,
         name: &String,
-        cfg: &ConfigGate,
+        cfg: &ConfigGateEnriched,
     ) -> Result<Self, scan2blob::error::WuffError> {
         let inner: GateInner = GateInner {
             sentinel: cfg.default_open,
@@ -267,7 +301,8 @@ impl Gate {
         let Some(name_hint) = self.get_current_state() else {
             return None;
         };
-        let Some(mime_type) = self.ctx.mime_types.get(orig_filename) else {
+        let Some(mime_type) = self.ctx.config.mime_types.get(orig_filename)
+        else {
             return None;
         };
         Some(destination.write_file(

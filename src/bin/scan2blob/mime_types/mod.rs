@@ -55,21 +55,24 @@ pub fn default_mime_types() -> ConfigMimeTypes {
 }
 
 #[derive(Clone)]
-pub struct MimeType {
+pub struct ConfigMimeTypeEnriched {
     pub suffix: String,
     pub content_type: String,
 }
 
-pub struct MimeTypes {
-    mime_types: std::collections::HashMap<String, MimeType>,
-}
+pub struct ConfigMimeTypesEnriched(
+    std::collections::HashMap<String, ConfigMimeTypeEnriched>,
+);
 
-impl MimeTypes {
-    pub fn new(
-        config: &ConfigMimeTypes,
+impl TryFrom<ConfigMimeTypes> for ConfigMimeTypesEnriched {
+    type Error = scan2blob::error::WuffError;
+    fn try_from(
+        config: ConfigMimeTypes,
     ) -> Result<Self, scan2blob::error::WuffError> {
-        let mut mime_types: std::collections::HashMap<String, MimeType> =
-            std::collections::HashMap::new();
+        let mut mime_types: std::collections::HashMap<
+            String,
+            ConfigMimeTypeEnriched,
+        > = std::collections::HashMap::new();
         for (extension, mime_type_cfg) in config {
             let extension: String = extension.to_lowercase();
             let suffix: String =
@@ -78,7 +81,7 @@ impl MimeTypes {
                 } else {
                     ".".to_string() + &extension
                 };
-            let mime_type: MimeType = MimeType {
+            let mime_type: ConfigMimeTypeEnriched = ConfigMimeTypeEnriched {
                 suffix,
                 content_type: mime_type_cfg.content_type.clone(),
             };
@@ -88,13 +91,15 @@ impl MimeTypes {
                 ));
             }
         }
-        Ok(Self { mime_types })
+        Ok(Self(mime_types))
     }
+}
 
-    pub fn get(&self, filename: &str) -> Option<MimeType> {
+impl ConfigMimeTypesEnriched {
+    pub fn get(&self, filename: &str) -> Option<ConfigMimeTypeEnriched> {
         let Some((_, extension)) = filename.rsplit_once('.') else {
             return None;
         };
-        self.mime_types.get(&extension.to_lowercase()).cloned()
+        self.0.get(&extension.to_lowercase()).cloned()
     }
 }

@@ -425,6 +425,31 @@ pub struct ConfigListenerSftp {
     authorized_keys: Vec<ConfigListenerSftpAuthorizedKey>,
 }
 
+pub struct ConfigListenerSftpEnriched {
+    listen_on: Vec<std::net::SocketAddr>,
+    host_key: String,
+    authorized_keys: Vec<ConfigListenerSftpAuthorizedKey>,
+}
+
+impl TryFrom<ConfigListenerSftp> for ConfigListenerSftpEnriched {
+    type Error = scan2blob::error::WuffError;
+
+    fn try_from(
+        config: ConfigListenerSftp,
+    ) -> Result<Self, scan2blob::error::WuffError> {
+        let ConfigListenerSftp {
+            listen_on,
+            host_key,
+            authorized_keys,
+        } = config;
+        Ok(Self {
+            listen_on,
+            host_key: host_key.try_into()?,
+            authorized_keys,
+        })
+    }
+}
+
 pub struct SftpListener {
     ctx: std::sync::Arc<crate::ctx::Ctx>,
     listen_on: Vec<std::net::SocketAddr>,
@@ -442,15 +467,14 @@ pub struct SftpListener {
 impl SftpListener {
     pub fn new(
         ctx: &std::sync::Arc<crate::ctx::Ctx>,
-        config: &ConfigListenerSftp,
+        config: &ConfigListenerSftpEnriched,
         destinations: &crate::destination::Destinations,
         gates: &crate::gate::Gates,
     ) -> Result<Self, scan2blob::error::WuffError> {
-        let host_key: String = config.host_key.get()?;
         // Can't use the ? operator on russh::keys::PrivateKey::from_openssh()
         // because it returns a weird Result type...
         let host_key: russh::keys::PrivateKey =
-            match russh::keys::PrivateKey::from_openssh(&host_key) {
+            match russh::keys::PrivateKey::from_openssh(&config.host_key) {
                 Ok(key) => key,
                 Err(_) => {
                     return Err(scan2blob::error::WuffError::from(

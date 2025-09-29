@@ -395,6 +395,34 @@ pub struct ConfigListenerWebdav {
     users: std::collections::HashMap<String, ConfigListenerWebdavUser>,
 }
 
+pub struct ConfigListenerWebdavEnriched {
+    listen_on: Vec<std::net::SocketAddr>,
+    certificate_chain: String,
+    private_key: String,
+    users: std::collections::HashMap<String, ConfigListenerWebdavUser>,
+}
+
+impl TryFrom<ConfigListenerWebdav> for ConfigListenerWebdavEnriched {
+    type Error = scan2blob::error::WuffError;
+
+    fn try_from(
+        config: ConfigListenerWebdav,
+    ) -> Result<Self, scan2blob::error::WuffError> {
+        let ConfigListenerWebdav {
+            listen_on,
+            certificate_chain,
+            private_key,
+            users,
+        } = config;
+        Ok(Self {
+            listen_on,
+            certificate_chain: certificate_chain.try_into()?,
+            private_key: private_key.try_into()?,
+            users,
+        })
+    }
+}
+
 struct WebdavListenerUser {
     password: String,
     destination_and_gate: DestinationAndGate,
@@ -413,14 +441,14 @@ pub struct WebdavListener {
 impl WebdavListener {
     pub fn new(
         ctx: &std::sync::Arc<crate::ctx::Ctx>,
-        config: &ConfigListenerWebdav,
+        config: &ConfigListenerWebdavEnriched,
         destinations: &crate::destination::Destinations,
         gates: &crate::gate::Gates,
     ) -> Result<Self, scan2blob::error::WuffError> {
-        let mut certificate_chain_data: std::io::Cursor<Vec<u8>> =
-            std::io::Cursor::new(config.certificate_chain.get()?.into_bytes());
-        let mut private_key_data: std::io::Cursor<Vec<u8>> =
-            std::io::Cursor::new(config.private_key.get()?.into_bytes());
+        let mut certificate_chain_data: std::io::Cursor<&[u8]> =
+            std::io::Cursor::new(config.certificate_chain.as_bytes());
+        let mut private_key_data: std::io::Cursor<&[u8]> =
+            std::io::Cursor::new(config.private_key.as_bytes());
         let mut certificate_chain: Vec<
             rustls_pki_types::CertificateDer<'static>,
         > = Vec::new();

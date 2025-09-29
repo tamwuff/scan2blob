@@ -164,6 +164,33 @@ pub struct ConfigGateWeb {
     users: std::collections::HashMap<String, String>,
 }
 
+pub struct ConfigGateWebEnriched {
+    listen_on: Vec<std::net::SocketAddr>,
+    certificate_chain: String,
+    private_key: String,
+    users: std::collections::HashMap<String, String>,
+}
+
+impl TryFrom<ConfigGateWeb> for ConfigGateWebEnriched {
+    type Error = scan2blob::error::WuffError;
+    fn try_from(
+        config: ConfigGateWeb,
+    ) -> Result<Self, scan2blob::error::WuffError> {
+        let ConfigGateWeb {
+            listen_on,
+            certificate_chain,
+            private_key,
+            users,
+        } = config;
+        Ok(Self {
+            listen_on,
+            certificate_chain: certificate_chain.try_into()?,
+            private_key: private_key.try_into()?,
+            users,
+        })
+    }
+}
+
 pub struct GateWebListener {
     ctx: std::sync::Arc<crate::ctx::Ctx>,
     listen_on: Vec<std::net::SocketAddr>,
@@ -180,12 +207,12 @@ impl GateWebListener {
     pub fn new(
         ctx: &std::sync::Arc<crate::ctx::Ctx>,
         gate: &std::sync::Arc<crate::gate::Gate>,
-        config: &ConfigGateWeb,
+        config: &ConfigGateWebEnriched,
     ) -> Result<Self, scan2blob::error::WuffError> {
-        let mut certificate_chain_data: std::io::Cursor<Vec<u8>> =
-            std::io::Cursor::new(config.certificate_chain.get()?.into_bytes());
-        let mut private_key_data: std::io::Cursor<Vec<u8>> =
-            std::io::Cursor::new(config.private_key.get()?.into_bytes());
+        let mut certificate_chain_data: std::io::Cursor<&[u8]> =
+            std::io::Cursor::new(config.certificate_chain.as_bytes());
+        let mut private_key_data: std::io::Cursor<&[u8]> =
+            std::io::Cursor::new(config.private_key.as_bytes());
         let mut certificate_chain: Vec<
             rustls_pki_types::CertificateDer<'static>,
         > = Vec::new();

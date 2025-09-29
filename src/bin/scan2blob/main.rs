@@ -5,7 +5,7 @@ mod listener;
 mod mime_types;
 
 async fn async_main(
-    ctx: std::sync::Arc<crate::ctx::Ctx>,
+    ctx: std::sync::Arc<ctx::Ctx>,
 ) -> Result<(), scan2blob::error::WuffError> {
     let destinations: destination::Destinations =
         destination::Destinations::new(&ctx)?;
@@ -22,7 +22,7 @@ async fn async_main(
     }
     for listener_cfg in &ctx.config.listeners {
         match listener_cfg {
-            ctx::ConfigListener::Sftp(listener_cfg) => {
+            listener::ConfigListenerEnriched::Sftp(listener_cfg) => {
                 let listener: std::sync::Arc<listener::sftp::SftpListener> =
                     std::sync::Arc::new(listener::sftp::SftpListener::new(
                         &ctx,
@@ -32,7 +32,7 @@ async fn async_main(
                     )?);
                 listener.start();
             }
-            ctx::ConfigListener::Webdav(listener_cfg) => {
+            listener::ConfigListenerEnriched::Webdav(listener_cfg) => {
                 let listener: std::sync::Arc<
                     listener::webdav::WebdavListener,
                 > = std::sync::Arc::new(
@@ -63,7 +63,7 @@ async fn async_main(
     }
 }
 
-fn main() -> Result<(), scan2blob::error::WuffError> {
+fn main() {
     // Set a process-wide default crypto provider that will be used by anything
     // that is based on rustls. e.g., this is what will be used by WebDAV, but
     // it is not relevant to sftp or the Azure blob stuff.
@@ -71,43 +71,59 @@ fn main() -> Result<(), scan2blob::error::WuffError> {
         .install_default()
         .expect("install default crypto provider");
 
-    let cmdline_parser: clap::Command = crate::ctx::make_cmdline_parser();
+    let cmdline_parser: clap::Command = ctx::make_cmdline_parser();
     let cmdline_matches: clap::ArgMatches = cmdline_parser.get_matches();
     let foreground: bool =
         *(cmdline_matches.get_one::<bool>("foreground").unwrap());
     let foreground_with_syslog: bool = *(cmdline_matches
         .get_one::<bool>("foreground_with_syslog")
         .unwrap());
-    let parsed_config: crate::ctx::ParsedConfig =
-        crate::ctx::ParsedConfig::new(&cmdline_matches);
-    if parsed_config.daemonize {
-        daemonize::Daemonize::new()
-            .stdout(daemonize::Stdio::keep())
-            .stderr(daemonize::Stdio::keep())
-            .start()?;
+    let logger: std::sync::Arc<ctx::Logger> =
+        std::sync::Arc::new(ctx::Logger::new(&cmdline_matches));
+    logger.install_panic_logger();
+    let config: ctx::ConfigEnriched =
+        match ctx::ConfigEnriched::new(&cmdline_matches) {
+            Ok(config) => config,
+            Err(e) => {
+                logger.log_err(format!("{}", e));
+                std::process::exit(1);
+            }
+        };
+    if !(foreground || foreground_with_syslog) {
+        if let Err(err) = daemonize::Daemonize::new()
+            .start()
+        {
+            logger.log_err(format!("{}", err));
+            std::process::exit(1);
+        }
+        logger.inform_daemonized();
     }
 
-    let ctx: std::sync::Arc<crate::ctx::Ctx> =
-        std::sync::Arc::new(parsed_config.into());
-    ctx.install_panic_logger();
+    let ctx: std::sync::Arc<ctx::Ctx> =
+        std::sync::Arc::new(ctx::Ctx::new(&logger, config));
 
-    let _pid_file: Option<PidFile> =
-        if let Some(pid_filename) = ctx.pid_filename.as_ref() {
-            Some(PidFile::new(pid_filename)?)
-        } else {
-            None
-        };
+    let _pid_file: Option<PidFile> = if let Some(pid_filename) =
+        cmdline_matches.get_one::<std::path::PathBuf>("pid_file")
+    {
+        Some(match PidFile::new(pid_filename) {
+            Ok(pid_file) => pid_file,
+            Err(err) => {
+                logger.log_err(format!("{}", err));
+                std::process::exit(1);
+            }
+        })
+    } else {
+        None
+    };
 
     ctx.log_err("running");
-    let main_result: Result<(), scan2blob::error::WuffError> = ctx
+    if let Err(err) = ctx
         .base_ctx
-        .run_async_main(async_main(std::sync::Arc::clone(&ctx)));
-    if ctx.daemonize {
-        if let Err(ref err) = main_result {
-            ctx.log_err(format!("{}", err));
-        }
+        .run_async_main(async_main(std::sync::Arc::clone(&ctx)))
+    {
+        ctx.log_err(format!("{}", err));
+        std::process::exit(1);
     }
-    main_result
 }
 
 struct PidFile {

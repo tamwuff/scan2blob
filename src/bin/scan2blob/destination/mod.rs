@@ -24,6 +24,34 @@ fn default_max_chunk_size() -> usize {
     1048576
 }
 
+pub struct ConfigDestinationEnriched {
+    pub blob_storage_spec: scan2blob::util::BlobStorageSpecEnriched,
+    pub initial_chunk_size: usize,
+    pub max_chunk_size: usize,
+}
+
+impl TryFrom<ConfigDestination> for ConfigDestinationEnriched {
+    type Error = scan2blob::error::WuffError;
+
+    fn try_from(
+        config: ConfigDestination,
+    ) -> Result<Self, scan2blob::error::WuffError> {
+        let ConfigDestination {
+            blob_storage_spec,
+            initial_chunk_size,
+            max_chunk_size,
+        } = config;
+        Ok(Self {
+            blob_storage_spec: blob_storage_spec.try_into()?,
+            initial_chunk_size,
+            max_chunk_size,
+        })
+    }
+}
+
+pub type ConfigDestinationsEnriched =
+    std::collections::HashMap<String, ConfigDestinationEnriched>;
+
 pub struct Destination {
     ctx: std::sync::Arc<crate::ctx::Ctx>,
     name: String,
@@ -37,13 +65,13 @@ impl Destination {
     pub fn new(
         ctx: &std::sync::Arc<crate::ctx::Ctx>,
         name: &str,
-        cfg: &ConfigDestination,
+        cfg: &ConfigDestinationEnriched,
     ) -> Result<Self, scan2blob::error::WuffError> {
         let container_client: azure_storage_blobs::prelude::ContainerClient =
             azure_storage_blobs::prelude::ClientBuilder::new(
                 cfg.blob_storage_spec.storage_account.clone(),
                 azure_storage::StorageCredentials::sas_token(
-                    cfg.blob_storage_spec.sas.get()?,
+                    &cfg.blob_storage_spec.sas,
                 )?,
             )
             .container_client(cfg.blob_storage_spec.container.clone());
@@ -205,6 +233,7 @@ impl Destinations {
         }
         Ok(Self { destinations })
     }
+
     pub fn get(&self, name: &str) -> Option<std::sync::Arc<Destination>> {
         self.destinations.get(name).cloned()
     }

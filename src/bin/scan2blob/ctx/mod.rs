@@ -38,57 +38,87 @@ pub fn make_cmdline_parser() -> clap::Command {
 }
 
 #[derive(serde::Deserialize)]
-#[serde(tag = "type")]
-pub enum ConfigListener {
-    #[serde(rename = "sftp")]
-    Sftp(crate::listener::sftp::ConfigListenerSftp),
-    #[serde(rename = "webdav")]
-    Webdav(crate::listener::webdav::ConfigListenerWebdav),
-}
-
-#[derive(serde::Deserialize)]
 pub struct Config {
-    pub listeners: Vec<ConfigListener>,
+    pub listeners: Vec<crate::listener::ConfigListener>,
     pub gates: crate::gate::ConfigGates,
     pub destinations: crate::destination::ConfigDestinations,
     #[serde(default = "crate::mime_types::default_mime_types")]
     pub mime_types: crate::mime_types::ConfigMimeTypes,
 }
 
-// Intermediate step towards building a Ctx. We parse the config before
-// daemonizing, but we build the rest of the Ctx after daemonizing.
-pub struct ParsedConfig {
-    pub config: Config,
-    pub pid_filename: Option<std::path::PathBuf>,
-    pub mime_types: crate::mime_types::MimeTypes,
+pub struct ConfigEnriched {
+    pub listeners: Vec<crate::listener::ConfigListenerEnriched>,
+    pub gates: crate::gate::ConfigGatesEnriched,
+    pub destinations: crate::destination::ConfigDestinationsEnriched,
+    pub mime_types: crate::mime_types::ConfigMimeTypesEnriched,
+}
+
+impl TryFrom<Config> for ConfigEnriched {
+    type Error = scan2blob::error::WuffError;
+    fn try_from(config: Config) -> Result<Self, scan2blob::error::WuffError> {
+        let Config {
+            listeners,
+            gates,
+            destinations,
+            mime_types,
+        } = config;
+        let mut enriched_listeners: Vec<
+            crate::listener::ConfigListenerEnriched,
+        > = Vec::with_capacity(listeners.len());
+        for listener in listeners {
+            enriched_listeners.push(listener.try_into()?);
+        }
+        let mut enriched_gates: crate::gate::ConfigGatesEnriched =
+            std::collections::HashMap::new();
+        for (name, gate) in gates {
+            assert!(enriched_gates.insert(name, gate.try_into()?).is_none());
+        }
+        let mut enriched_destinations: crate::destination::ConfigDestinationsEnriched =
+            std::collections::HashMap::new();
+        for (name, destination) in destinations {
+            assert!(
+                enriched_destinations
+                    .insert(name, destination.try_into()?)
+                    .is_none()
+            );
+        }
+        Ok(Self {
+            listeners: enriched_listeners,
+            gates: enriched_gates,
+            destinations: enriched_destinations,
+            mime_types: mime_types.try_into()?,
+        })
+    }
+}
+
+impl ConfigEnriched {
+    pub fn new(
+        cmdline_matches: &clap::ArgMatches,
+    ) -> Result<Self, scan2blob::error::WuffError> {
+        let config_filename: &std::path::PathBuf = cmdline_matches
+            .get_one::<std::path::PathBuf>("config_file")
+            .unwrap();
+        let _config_filename_as_str = config_filename.to_string_lossy();
+        let f: std::fs::File = std::fs::File::open(config_filename)?;
+        let f: std::io::BufReader<_> = std::io::BufReader::new(f);
+        let config: Config = serde_json::from_reader(f)?;
+        config.try_into()
+    }
+}
+
+pub struct Logger {
     pub debug: bool,
-    pub daemonize: bool,
     log_to_stderr: std::sync::atomic::AtomicBool,
     log_to_syslog: Option<Syslog>,
 }
 
-impl ParsedConfig {
+impl Logger {
     pub fn new(cmdline_matches: &clap::ArgMatches) -> Self {
-        let config_filename: &std::path::PathBuf = cmdline_matches
-            .get_one::<std::path::PathBuf>("config_file")
-            .unwrap();
-        let config_filename_as_str = config_filename.to_string_lossy();
-        let f: std::fs::File = std::fs::File::open(config_filename)
-            .expect(&config_filename_as_str);
-        let f: std::io::BufReader<_> = std::io::BufReader::new(f);
-        let config: Config =
-            serde_json::from_reader(f).expect(&config_filename_as_str);
-
-        let mime_types: crate::mime_types::MimeTypes =
-            crate::mime_types::MimeTypes::new(&config.mime_types)
-                .expect(&config_filename_as_str);
-
         let foreground: bool =
             *(cmdline_matches.get_one::<bool>("foreground").unwrap());
         let foreground_with_syslog: bool = *(cmdline_matches
             .get_one::<bool>("foreground_with_syslog")
             .unwrap());
-        let daemonize: bool = !(foreground || foreground_with_syslog);
         let log_to_syslog: Option<Syslog> =
             if foreground_with_syslog || !foreground {
                 Some(Syslog::new())
@@ -96,71 +126,10 @@ impl ParsedConfig {
                 None
             };
         Self {
-            config,
-            pid_filename: cmdline_matches
-                .get_one::<std::path::PathBuf>("pid_file")
-                .cloned(),
-            mime_types,
             debug: *(cmdline_matches.get_one::<bool>("debug").unwrap()),
-            daemonize,
             log_to_stderr: std::sync::atomic::AtomicBool::new(true),
             log_to_syslog,
         }
-    }
-}
-
-pub struct Ctx {
-    pub base_ctx: std::sync::Arc<scan2blob::ctx::Ctx>,
-    pub config: Config,
-    pub pid_filename: Option<std::path::PathBuf>,
-    pub mime_types: crate::mime_types::MimeTypes,
-    pub debug: bool,
-    pub daemonize: bool,
-    pub shutdown_due_to_error:
-        tokio::sync::SetOnce<scan2blob::error::WuffError>,
-    log_to_stderr: std::sync::atomic::AtomicBool,
-    log_to_syslog: Option<Syslog>,
-}
-
-impl From<ParsedConfig> for Ctx {
-    fn from(parsed_config: ParsedConfig) -> Self {
-        let ParsedConfig {
-            config,
-            pid_filename,
-            mime_types,
-            debug,
-            daemonize,
-            log_to_stderr,
-            log_to_syslog,
-        } = parsed_config;
-        Self {
-            base_ctx: std::sync::Arc::new(scan2blob::ctx::Ctx::new()),
-            config,
-            pid_filename,
-            mime_types,
-            debug,
-            daemonize,
-            shutdown_due_to_error: tokio::sync::SetOnce::new(),
-            log_to_stderr,
-            log_to_syslog,
-        }
-    }
-}
-
-impl Ctx {
-    pub fn install_panic_logger(self: &std::sync::Arc<Self>) {
-        // This is a compromise. I don't want to call through to the default
-        // hook, but I'm also not willing to replicate all of the default
-        // hook's functionality. So I'm going to log an error, but then let the
-        // default hook take over...
-        let prev_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new({
-            let self_: std::sync::Arc<Self> = std::sync::Arc::clone(self);
-            move |panic_info| {
-                self_.log_err(format!("panic: {}", panic_info));
-                prev_hook(panic_info)
-            }
-        }));
     }
 
     pub fn log_debug<T: AsRef<str>>(&self, s: T) {
@@ -214,11 +183,49 @@ impl Ctx {
         }
     }
 
+    pub fn install_panic_logger(self: &std::sync::Arc<Self>) {
+        // This is a compromise. I don't want to call through to the default
+        // hook, but I'm also not willing to replicate all of the default
+        // hook's functionality. So I'm going to log an error, but then let the
+        // default hook take over...
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new({
+            let self_: std::sync::Arc<Self> = std::sync::Arc::clone(self);
+            move |panic_info| {
+                self_.log_err(format!("panic: {}", panic_info));
+                prev_hook(panic_info)
+            }
+        }));
+    }
+
     pub fn inform_daemonized(&self) {
         self.log_to_stderr
             .store(false, std::sync::atomic::Ordering::Relaxed);
+
         if let Some(ref syslog) = self.log_to_syslog {
             syslog.regenerate_after_fork();
+        }
+    }
+}
+
+pub struct Ctx {
+    pub base_ctx: std::sync::Arc<scan2blob::ctx::Ctx>,
+    pub config: ConfigEnriched,
+    pub logger: std::sync::Arc<Logger>,
+    pub shutdown_due_to_error:
+        tokio::sync::SetOnce<scan2blob::error::WuffError>,
+}
+
+impl Ctx {
+    pub fn new(
+        logger: &std::sync::Arc<Logger>,
+        config: ConfigEnriched,
+    ) -> Self {
+        Self {
+            base_ctx: std::sync::Arc::new(scan2blob::ctx::Ctx::new()),
+            config,
+            logger: std::sync::Arc::clone(logger),
+            shutdown_due_to_error: tokio::sync::SetOnce::new(),
         }
     }
 
@@ -249,6 +256,22 @@ impl Ctx {
                 let _ = self_.shutdown_due_to_error.set(err);
             }
         });
+    }
+
+    pub fn log_debug<T: AsRef<str>>(&self, s: T) {
+        self.logger.log_debug(s);
+    }
+
+    pub fn log_info<T: AsRef<str>>(&self, s: T) {
+        self.logger.log_info(s);
+    }
+
+    pub fn log_warn<T: AsRef<str>>(&self, s: T) {
+        self.logger.log_warn(s);
+    }
+
+    pub fn log_err<T: AsRef<str>>(&self, s: T) {
+        self.logger.log_err(s);
     }
 }
 
