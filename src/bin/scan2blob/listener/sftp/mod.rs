@@ -35,38 +35,30 @@ impl russh::server::Handler for SshConnection {
 
     async fn auth_publickey_offered(
         &mut self,
-        _user: &str,
+        username: &str,
         public_key: &russh::keys::ssh_key::PublicKey,
     ) -> Result<russh::server::Auth, Self::Error> {
-        Ok(
-            if self
-                .sftp_listener
-                .authorized_keys
-                .contains_key(public_key.key_data())
-            {
-                russh::server::Auth::Accept
-            } else {
-                russh::server::Auth::reject()
-            },
-        )
+        if let Some(user) = self.sftp_listener.users.get(username) {
+            if user.authorized_keys.contains(public_key.key_data()) {
+                return Ok(russh::server::Auth::Accept);
+            }
+        }
+        Ok(russh::server::Auth::reject())
     }
 
     async fn auth_publickey(
         &mut self,
-        _user: &str,
+        username: &str,
         public_key: &russh::keys::ssh_key::PublicKey,
     ) -> Result<russh::server::Auth, Self::Error> {
-        let Some(destination_and_gate) = self
-            .sftp_listener
-            .authorized_keys
-            .get(public_key.key_data())
-        else {
-            return Ok(russh::server::Auth::reject());
-        };
-
-        self.authenticated_destination_and_gate =
-            Some(destination_and_gate.clone());
-        Ok(russh::server::Auth::Accept)
+        if let Some(user) = self.sftp_listener.users.get(username) {
+            if user.authorized_keys.contains(public_key.key_data()) {
+                self.authenticated_destination_and_gate =
+                    Some(user.destination_and_gate.clone());
+                return Ok(russh::server::Auth::Accept);
+            }
+        }
+        Ok(russh::server::Auth::reject())
     }
 
     async fn channel_open_session(
@@ -396,7 +388,6 @@ impl SftpListenerEachPort {
         )
         .await
         .unwrap();
-        panic!("run_on_address exited");
     }
 }
 
@@ -412,8 +403,9 @@ impl russh::server::Server for SftpListenerEachPort {
 }
 
 #[derive(serde::Deserialize)]
-pub struct ConfigListenerSftpAuthorizedKey {
-    public_key: String,
+pub struct ConfigListenerSftpUser {
+    #[serde(default)]
+    authorized_keys: Vec<String>,
     destination: String,
     gate: String,
 }
@@ -422,13 +414,56 @@ pub struct ConfigListenerSftpAuthorizedKey {
 pub struct ConfigListenerSftp {
     listen_on: Vec<std::net::SocketAddr>,
     host_key: scan2blob::util::LiteralOrFile,
-    authorized_keys: Vec<ConfigListenerSftpAuthorizedKey>,
+    users: std::collections::HashMap<String, ConfigListenerSftpUser>,
+}
+
+pub struct ConfigListenerSftpUserEnriched {
+    authorized_keys: Vec<russh::keys::PublicKey>,
+    destination: String,
+    gate: String,
 }
 
 pub struct ConfigListenerSftpEnriched {
     listen_on: Vec<std::net::SocketAddr>,
-    host_key: String,
-    authorized_keys: Vec<ConfigListenerSftpAuthorizedKey>,
+    host_key: russh::keys::PrivateKey,
+    users: std::collections::HashMap<String, ConfigListenerSftpUserEnriched>,
+}
+
+impl TryFrom<ConfigListenerSftpUser> for ConfigListenerSftpUserEnriched {
+    type Error = scan2blob::error::WuffError;
+
+    fn try_from(
+        config: ConfigListenerSftpUser,
+    ) -> Result<Self, scan2blob::error::WuffError> {
+        let ConfigListenerSftpUser {
+            authorized_keys,
+            destination,
+            gate,
+        } = config;
+
+        let mut authorized_keys_enriched: Vec<russh::keys::PublicKey> =
+            Vec::new();
+        for public_key in authorized_keys {
+            // Can't use the ? operator on russh::keys::PublicKey::from_openssh
+            // because it returns a weird Result type...
+            let public_key: russh::keys::PublicKey =
+                match russh::keys::PublicKey::from_openssh(&public_key) {
+                    Ok(key) => key,
+                    Err(_) => {
+                        return Err(scan2blob::error::WuffError::from(
+                            "Error parsing user public key",
+                        ));
+                    }
+                };
+            authorized_keys_enriched.push(public_key);
+        }
+
+        Ok(Self {
+            authorized_keys: authorized_keys_enriched,
+            destination,
+            gate,
+        })
+    }
 }
 
 impl TryFrom<ConfigListenerSftp> for ConfigListenerSftpEnriched {
@@ -440,27 +475,54 @@ impl TryFrom<ConfigListenerSftp> for ConfigListenerSftpEnriched {
         let ConfigListenerSftp {
             listen_on,
             host_key,
-            authorized_keys,
+            users,
         } = config;
+
+        let host_key: String = host_key.try_into()?;
+        // Can't use the ? operator on russh::keys::PrivateKey::from_openssh()
+        // because it returns a weird Result type...
+        let host_key: russh::keys::PrivateKey =
+            match russh::keys::PrivateKey::from_openssh(&host_key) {
+                Ok(key) => key,
+                Err(_) => {
+                    return Err(scan2blob::error::WuffError::from(
+                        "Error parsing ssh host key",
+                    ));
+                }
+            };
+
+        let mut users_enriched: std::collections::HashMap<
+            String,
+            ConfigListenerSftpUserEnriched,
+        > = std::collections::HashMap::new();
+        for (username, user) in users {
+            assert!(
+                users_enriched.insert(username, user.try_into()?).is_none()
+            );
+        }
+
         Ok(Self {
             listen_on,
-            host_key: host_key.try_into()?,
-            authorized_keys,
+            host_key,
+            users: users_enriched,
         })
     }
 }
 
+pub struct SftpListenerUser {
+    // You would think that russh::keys::PublicKey would implement Hash and
+    // Eq, but it doesn't, or at least not in any way that makes sense. So we
+    // have to use this freakish KeyData thing...
+    authorized_keys: std::collections::HashSet<
+        internal_russh_forked_ssh_key::public::KeyData,
+    >,
+    destination_and_gate: DestinationAndGate,
+}
 pub struct SftpListener {
     ctx: std::sync::Arc<crate::ctx::Ctx>,
     listen_on: Vec<std::net::SocketAddr>,
     host_key: russh::keys::PrivateKey,
-    // You would think that russh::keys::PublicKey would implement Hash and
-    // Eq, but it doesn't, or at least not in any way that makes sense. So we
-    // have to use this freakish KeyData thing...
-    authorized_keys: std::collections::HashMap<
-        internal_russh_forked_ssh_key::public::KeyData,
-        DestinationAndGate,
-    >,
+    users: std::collections::HashMap<String, SftpListenerUser>,
     auth_methods: russh::MethodSet,
 }
 
@@ -471,38 +533,23 @@ impl SftpListener {
         destinations: &crate::destination::Destinations,
         gates: &crate::gate::Gates,
     ) -> Result<Self, scan2blob::error::WuffError> {
-        // Can't use the ? operator on russh::keys::PrivateKey::from_openssh()
-        // because it returns a weird Result type...
-        let host_key: russh::keys::PrivateKey =
-            match russh::keys::PrivateKey::from_openssh(&config.host_key) {
-                Ok(key) => key,
-                Err(_) => {
-                    return Err(scan2blob::error::WuffError::from(
-                        "Error parsing ssh host key",
-                    ));
-                }
-            };
-        let mut authorized_keys: std::collections::HashMap<
-            internal_russh_forked_ssh_key::public::KeyData,
-            DestinationAndGate,
-        > = std::collections::HashMap::new();
-        for ConfigListenerSftpAuthorizedKey {
-            public_key,
-            destination,
-            gate,
-        } in &config.authorized_keys
+        let mut users: std::collections::HashMap<String, SftpListenerUser> =
+            std::collections::HashMap::new();
+        for (
+            username,
+            ConfigListenerSftpUserEnriched {
+                authorized_keys,
+                destination,
+                gate,
+            },
+        ) in &config.users
         {
-            // Can't use the ? operator on russh::keys::PublicKey::from_openssh
-            // because it returns a weird Result type...
-            let public_key: russh::keys::PublicKey =
-                match russh::keys::PublicKey::from_openssh(public_key) {
-                    Ok(key) => key,
-                    Err(_) => {
-                        return Err(scan2blob::error::WuffError::from(
-                            "Error parsing user public key",
-                        ));
-                    }
-                };
+            let authorized_keys: std::collections::HashSet<
+                internal_russh_forked_ssh_key::public::KeyData,
+            > = authorized_keys
+                .iter()
+                .map(|public_key| public_key.key_data().clone())
+                .collect();
             let Some(destination) = destinations.get(destination) else {
                 return Err(scan2blob::error::WuffError::from(
                     "Destination not found",
@@ -513,25 +560,28 @@ impl SftpListener {
                     "Gate not found",
                 ));
             };
-            if authorized_keys
-                .insert(
-                    public_key.key_data().clone(),
-                    DestinationAndGate { destination, gate },
-                )
-                .is_some()
-            {
-                return Err(scan2blob::error::WuffError::from(
-                    "Duplicate user public key",
-                ));
-            }
+            assert!(
+                users
+                    .insert(
+                        username.clone(),
+                        SftpListenerUser {
+                            authorized_keys,
+                            destination_and_gate: DestinationAndGate {
+                                destination,
+                                gate
+                            }
+                        },
+                    )
+                    .is_none()
+            );
         }
         let mut auth_methods: russh::MethodSet = russh::MethodSet::empty();
         auth_methods.push(russh::MethodKind::PublicKey);
         Ok(Self {
             ctx: std::sync::Arc::clone(ctx),
             listen_on: config.listen_on.clone(),
-            host_key,
-            authorized_keys,
+            host_key: config.host_key.clone(),
+            users,
             auth_methods,
         })
     }

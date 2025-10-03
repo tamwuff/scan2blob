@@ -100,16 +100,14 @@ impl Destination {
             MAX_NUM_CHUNKS,
         );
 
-        self.ctx.spawn_critical(
-            format!("destination {}", self.name),
-            std::sync::Arc::clone(self).do_upload(
-                reader,
-                now,
-                name_hint,
-                suffix,
-                content_type,
-            ),
-        );
+        let async_spawner = self.ctx.base_ctx.get_async_spawner();
+        async_spawner.spawn(std::sync::Arc::clone(self).do_upload(
+            reader,
+            now,
+            name_hint,
+            suffix,
+            content_type,
+        ));
 
         writer
     }

@@ -90,9 +90,7 @@ fn main() {
             }
         };
     if !(foreground || foreground_with_syslog) {
-        if let Err(err) = daemonize::Daemonize::new()
-            .start()
-        {
+        if let Err(err) = daemonize::Daemonize::new().start() {
             logger.log_err(format!("{}", err));
             std::process::exit(1);
         }
