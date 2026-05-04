@@ -373,32 +373,42 @@ struct SftpListenerEachPort {
 }
 
 impl SftpListenerEachPort {
-    async fn run(mut self) {
-        let russh_config: russh::server::Config = russh::server::Config {
-            methods: self.sftp_listener.auth_methods.clone(),
-            keys: vec![self.sftp_listener.host_key.clone()],
-            ..Default::default()
-        };
-
-        let listen_on: std::net::SocketAddr = self.listen_on;
-        russh::server::Server::run_on_address(
-            &mut self,
-            std::sync::Arc::new(russh_config),
-            listen_on,
-        )
-        .await
-        .unwrap();
-    }
-}
-
-impl russh::server::Server for SftpListenerEachPort {
-    type Handler = SshConnection;
-
-    fn new_client(
-        &mut self,
-        _: Option<std::net::SocketAddr>,
-    ) -> Self::Handler {
-        SshConnection::new(&self.sftp_listener)
+    async fn run(self) {
+        // We could use russh::server::Server::run_on_address(), but it has a
+        // bug where it treats ECONNABORTED from accept() as being fatal to the
+        // whole server. So we use russh::server::run_stream() instead.
+        let async_spawner =
+            self.sftp_listener.ctx.base_ctx.get_async_spawner();
+        let server_sock: tokio::net::TcpListener =
+            tokio::net::TcpListener::bind(&self.listen_on)
+                .await
+                .expect(&format!("{}", self.listen_on));
+        loop {
+            let Ok((sock, _peername)) = server_sock.accept().await else {
+                // log something
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                continue;
+            };
+            let russh_config: std::sync::Arc<russh::server::Config> =
+                std::sync::Arc::clone(&self.sftp_listener.russh_config);
+            let ssh_connection: SshConnection =
+                SshConnection::new(&self.sftp_listener);
+            async_spawner.spawn(async move {
+                let Ok(fut) = russh::server::run_stream(
+                    russh_config,
+                    sock,
+                    ssh_connection,
+                )
+                .await
+                else {
+                    // log something
+                    return;
+                };
+                if fut.await.is_err() {
+                    // log something
+                }
+            });
+        }
     }
 }
 
@@ -521,9 +531,8 @@ pub struct SftpListenerUser {
 pub struct SftpListener {
     ctx: std::sync::Arc<crate::ctx::Ctx>,
     listen_on: Vec<std::net::SocketAddr>,
-    host_key: russh::keys::PrivateKey,
     users: std::collections::HashMap<String, SftpListenerUser>,
-    auth_methods: russh::MethodSet,
+    russh_config: std::sync::Arc<russh::server::Config>,
 }
 
 impl SftpListener {
@@ -577,12 +586,16 @@ impl SftpListener {
         }
         let mut auth_methods: russh::MethodSet = russh::MethodSet::empty();
         auth_methods.push(russh::MethodKind::PublicKey);
+        let russh_config: russh::server::Config = russh::server::Config {
+            methods: auth_methods,
+            keys: vec![config.host_key.clone()],
+            ..Default::default()
+        };
         Ok(Self {
             ctx: std::sync::Arc::clone(ctx),
             listen_on: config.listen_on.clone(),
-            host_key: config.host_key.clone(),
             users,
-            auth_methods,
+            russh_config: std::sync::Arc::new(russh_config),
         })
     }
 
